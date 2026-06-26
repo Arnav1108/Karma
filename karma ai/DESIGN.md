@@ -1,6 +1,6 @@
-# Karma Advisor — Agentic Workflow Design
+# Karma  — Agentic Workflow Design
 
-> Living design document for the Karma Advisor recommendation pipeline (Karma Computers).
+> Living design document for the Karma ai recommendation pipeline (Karma Computers).
 > **Status legend:** 🔒 Locked · 🛠️ Implemented · 🚧 In design · ❓ Open
 > _Last updated: 2026-06-26_
 
@@ -8,7 +8,7 @@
 
 ## 1. System Overview
 
-Karma Advisor is the multi-agent recommendation engine at the center of **Karma Computers**, a B2C e-commerce platform for PC parts and custom builds aimed at Indian consumers. It takes a user's needs expressed in natural language and produces a single, compatible, budget-fit PC build.
+Karma AI is the multi-agent recommendation engine at the center of **Karma Computers**, a B2C e-commerce platform for PC parts and custom builds aimed at Indian consumers. It takes a user's needs expressed in natural language and produces a single, compatible, budget-fit PC build.
 
 The pipeline is **design-first**: every agent is fully scoped and locked before implementation. It runs as a linear flow with one deterministic gate between intake and allocation.
 
@@ -341,4 +341,4 @@ hard_constraints:
 
 ## Maintaining this doc
 
-Keep this file in the Karma Advisor repo (e.g. `/docs/DESIGN.md`). At the end of a design session: paste the current file in, work through decisions, ask for the updated Markdown, paste it back, and commit. Every change is then git-tracked, and any fresh session gets full context from one paste.
+Keep this file in the Karma ai repo (e.g. `/docs/DESIGN.md`). At the end of a design session: paste the current file in, work through decisions, ask for the updated Markdown, paste it back, and commit. Every change is then git-tracked, and any fresh session gets full context from one paste.
