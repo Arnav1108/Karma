@@ -15,9 +15,9 @@ The pipeline is **design-first**: every agent is fully scoped and locked before 
 ```mermaid
 flowchart TD
     U([User]) -->|freeform conversation| N1[Node 1<br/>Information Extraction Agent]
-    N1 -->|User Build Brief JSON| FC{Feasibility Check<br/>deterministic · LLM-free}
-    FC -->|infeasible| FAIL[Surface to user:<br/>lower demands / raise budget]
-    FC -->|feasible| PRE[Deterministic pre-steps:<br/>shopping list + fixed-cost subtraction]
+    N1 -->|User Build Brief JSON| FC{Feasibility Check<br/>rough estimate · LLM-assisted}
+    FC -->|impossible| FAIL[Surface to user:<br/>lower demands / raise budget]
+    FC -->|comfortable or tight| PRE[Deterministic pre-steps:<br/>shopping list + fixed-cost subtraction]
     PRE --> N2[Node 2<br/>Budget Allocation Agent]
     N2 -->|price bands per component| N3[Node 3<br/>Part Finder & Recommender]
     N3 -->|build card| CONFIRM([User confirmation])
@@ -45,17 +45,33 @@ flowchart TD
 - **Output:** Canonical **User Build Brief** JSON (full schema in **Appendix A**).
 - **Not responsible for** feasibility or contradiction checking — Node One has no tier/benchmark data; its only jobs are asking questions and forming valid JSON. The Feasibility Check is the arbiter of buildability at budget.
 
-### 2.2 Feasibility Check 🚧 (in design)
+### 2.2 Feasibility Check 🔒
 
-> Nothing here is built yet — this is architecture only. (An earlier "implemented / 8 files / 11 passing tests" note was inaccurate and has been removed.)
+**Role:** Lightweight pre-Node-Two gate. Answers one question before two more nodes run: *can the user's requirements be built within their budget?* Produces a rough estimate — no inventory search, no part selection, no compatibility validation. Those are Node Three's job.
 
-- Deterministic, **LLM-free** layer sitting between Node One and Node Two. It answers one honest question before two more nodes run: *is this brief buildable at this budget given live in-stock inventory?*
-- **Direction:** look up minimum/target hardware requirements per `software` entry, aggregate component-level floors across the workload, translate to a minimum buildable + compatible + in-stock cost (respecting `hard_constraints`, which can themselves raise the floor), and compare to budget.
-- **Verdict model — OPEN ❓:** to be settled in the dedicated Feasibility session. Two candidates on the table:
-  - **binary** feasible / infeasible + cost bounds (lower bound gates the impossible, realistic minimum gates the uncomfortable), or
-  - **three-state** comfortable / tight-but-possible / impossible.
-- **Known placeholders (when built):** realistic-min buffer, non-component cost estimates, reused-parts compatibility stubs (consume PC-of-record data from the Brief — see Appendix A).
-- **Design deferred to its own session** (per this session's decision to switch context for it).
+**Three steps:**
+
+1. **Requirements Resolver** — per `software` entry, look up base component floor (what GPU class, how much RAM, etc.), scale by the performance envelope (`resolution`, `framerate`, `hdr`), aggregate across the full workload:
+   - GPU tier, CPU tier, VRAM: **max** across software (peak demand wins).
+   - Storage: **additive** (workloads stack their capacity needs).
+   - RAM: **max** single-app floor, plus a concurrency bump if two or more heavy workloads run simultaneously.
+   - Hard constraints that raise the floor (e.g. SFF/ITX form factor, brand exclusions) are folded in here.
+   - Reused parts: their cost is zeroed; their constraints (socket, form factor) remain live.
+
+2. **Scope aggregator** — add non-component line-items depending on `budget.scope`: monitor (if unowned and in scope), OS license, must-have peripherals. Subtract reused-part costs.
+
+3. **LLM-assisted cost estimate** — the LLM receives the aggregated floor, the full budget picture, and **one live price anchor pulled from Postgres**: the current minimum catalog price for the binding component (almost always the GPU; sometimes CPU for heavy compute workloads). The LLM reasons about the rest from general knowledge of Indian PC part pricing and returns a verdict with a brief reason.
+
+**Verdict — three-state 🔒:**
+- `comfortable` — budget has meaningful headroom above the estimated floor.
+- `tight` — buildable but little flexibility; expect compromises.
+- `impossible` — floor estimate materially exceeds the ceiling.
+
+**Routing:** `comfortable` or `tight` → proceed to Node Two. `impossible` → Type Two failure: surface to the user with the binding constraint and suggested adjustments (raise budget, lower resolution target, relax form-factor constraint, etc.). Node One Brief is re-entered if the user adjusts.
+
+**What this is not:** the Feasibility Check does not validate a complete build, does not search inventory, and does not pick parts. It is a rough gate — honest about the fact that it is an estimate.
+
+**Known open items:** realistic-min buffer calibration; non-component cost estimates are currently rough; reused-parts compatibility stubs need PC-of-record data from `existing.existing_pc_build_id` (Brief Appendix A).
 
 ### 2.3 Node Two — Budget Allocation Agent 🔒
 
@@ -132,7 +148,7 @@ flowchart LR
 | Stage | Produces | Shape / notes |
 |---|---|---|
 | Node One | User Build Brief | JSON; budget + primary use case mandatory; now also carries software/workload, monitor, peripherals, storage, OS, existing/reused parts, and pinned `hard_constraints` — full schema in **Appendix A** |
-| Feasibility Check | verdict + cost figures | verdict model OPEN ❓ (binary feasible/infeasible + bounds, or comfortable/tight/impossible) — settled in the Feasibility session |
+| Feasibility Check | verdict + reason | `comfortable \| tight \| impossible`; comfortable/tight → proceed to Node Two; impossible → surface to user with binding constraint + suggested adjustments |
 | Node Two pre-steps | shopping list + core budget pool | deterministic; fixed costs already subtracted |
 | Node Two | price bands | JSON low/mid/high INR per shopping-list component |
 | Node Three | build card | human-readable summary; product IDs sent to backend on confirm |
@@ -164,7 +180,9 @@ flowchart LR
 | Catalog price floors excluded from Node Two | Allocation reasoning is Node Two's job; finding parts within bands is Node Three's. |
 | Neo4j over Postgres for compatibility | Same-semantic-space traversal is worth the architectural simplicity; weightless edges are still valid graph relationships. |
 | RAG over fine-tuning | Fine-tuning can't track volatile daily Indian pricing, goes stale on hardware launches, and is a black box. |
-| Determinism at the feasibility gate | Avoids non-determinism at the gate. Constraint-satisfaction minimum-cost computation is correct; greedy column-minima is not. |
+| Feasibility Check is LLM-assisted, not LLM-free | Pure determinism would require a complete inventory search to price the floor accurately — that is Node Three's job, not a gate's. An LLM call with one live Postgres price anchor (cheapest binding component) is fast, honest about being a rough estimate, and avoids pulling inventory logic into the wrong stage. |
+| Feasibility Check does not search inventory | Finding and validating parts is Node Three's responsibility. The gate only answers "is this roughly buildable in budget?" — not "which parts?" Keeping the boundary clean prevents two nodes doing the same work. |
+| One live price anchor (Postgres) injected into the LLM prompt | Indian PC pricing is volatile. The GPU — the most expensive and most volatile component — is anchored to the current catalog minimum price so the estimate doesn't go stale on the one number that matters most. Everything else the LLM reasons about from general knowledge. |
 | Supabase as managed Postgres host (not full BaaS) | Fastify handles the API layer, Prisma the ORM. Does not replace Neo4j, Redis, or Meilisearch. |
 
 ---
@@ -174,7 +192,7 @@ flowchart LR
 - **Knowledge graph (next session):** Cypher query patterns, Neo4j schema implementation, benchmark data sourcing, weight rubric design.
 - **Fitness weights (open ❓):** precise decimals vs coarse buckets? Scope `good_for` weights to use-case alone, or use-case + resolution-tier pairs?
 - **Node Three refinement loop:** implementation.
-- **Feasibility Check (its own session):** full design is pending — verdict model (binary vs three-state), the per-software requirement-lookup mechanism, floor aggregation across mixed workloads, minimum-buildable-cost computation against live stock, and verdict thresholds. Then the placeholders: realistic-min buffer logic, non-component cost estimates, reused-parts compatibility stubs (the Brief now defines the PC-of-record data these need — see `existing.existing_pc_build_id` and `existing.reuse_parts` in Appendix A).
+- **Feasibility Check — remaining open items:** realistic-min buffer calibration (how much headroom separates tight from comfortable); non-component cost estimates (currently rough floor values); reused-parts compatibility stubs (need PC-of-record data from `existing.existing_pc_build_id` in Appendix A).
 - **Node One retry policy:** exact malformed/non-conformant retry count and escalation path — deferred to testing.
 - **Context window management strategy:** flagged as its own dedicated session topic.
 
