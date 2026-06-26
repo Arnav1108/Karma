@@ -31,19 +31,31 @@ flowchart TD
 
 ### 2.1 Node One — Information Extraction Agent 🔒
 
-- **Role:** Conversation-first intake. Structured questions are answered in freeform paragraphs; one question per turn with opportunistic schema extraction.
-- **Stops** once budget + primary use case are filled.
-- **Output:** Canonical **User Build Brief** JSON.
-- **Not responsible for** feasibility or contradiction checking — that is a downstream concern.
+- **Role:** Conversation-first intake. A set of **predefined, structured questions**, each answered by the user in a **freeform paragraph**. Not dropdowns, not open-ended free chat — fixed questions, paragraph answers.
+- **Intake-model decision (conversation-first over wizard):** chosen deliberately. The build-requirement space is combinatorial and cannot be enumerated as wizard branches; conversation is the agentic thesis of the product; and the choice is **reversible** because both intake modes would produce the *identical* Brief — a guided wizard can be added later as additive front-end UI without touching any downstream node.
+- **Question flow:**
+  - **One question per turn**, but extraction is **opportunistic against the full Brief schema** — anything the user volunteers (even if it answers a later question) is captured immediately and the corresponding questions are skipped.
+  - **Questions are static / predefined, not dynamically branched.** A user's answer never changes *which* questions are asked; it only affects downstream nodes. The sole exception is targeted **ask-if-ambiguous** clarifications (e.g. "video editing" → "which software?").
+  - **Final question is open-ended**, asked after the others: *"any hard constraints / must-haves / must-nots?"* → populates the pinned `hard_constraints` block (`source: user_stated`).
+- **Question set + stop condition:** there is **one finite, pre-prepared set of questions**. By default the agent works through the **entire set**, then locks the Brief — the list itself is the bound (no arbitrary max count). Two stop rules govern this:
+  - **Required floor:** **budget + primary use case must be answered before proceeding.** This is the gate — intake cannot move past it without both.
+  - **User early exit:** once the floor is met, if the user says "done" / "stop" at any point, intake ends there and the Brief locks immediately.
+  - Otherwise (no early exit), every question in the pre-prepared set is asked. _(Supersedes the earlier "stops once budget + primary use case are filled" wording, and replaces the interim "max question count" idea — there is no count, only the fixed set + user stop.)_
+- **Extraction + validation:** each paragraph answer → LLM returns JSON against the schema → **two-stage validation**: (1) JSON syntax (`JSON.parse`), (2) schema + enum conformance. Valid → merge into Brief. Malformed / non-conformant → retry then flag (exact retry policy deferred to testing).
+- **Output:** Canonical **User Build Brief** JSON (full schema in **Appendix A**).
+- **Not responsible for** feasibility or contradiction checking — Node One has no tier/benchmark data; its only jobs are asking questions and forming valid JSON. The Feasibility Check is the arbiter of buildability at budget.
 
-### 2.2 Feasibility Check 🛠️ (implemented)
+### 2.2 Feasibility Check 🚧 (in design)
 
-- Deterministic, **LLM-free** Python package — 8 files, 11 passing tests.
-- Uses Postgres for compatibility via shared category-ID matching and numeric fit comparisons.
-- Computes two cost numbers:
-  - **Lower bound** — gates the impossible.
-  - **Realistic minimum** — gates the uncomfortable.
-- **Known placeholders (flagged):** realistic-min buffer, hardcoded non-component costs, reused-parts compatibility stubs.
+> Nothing here is built yet — this is architecture only. (An earlier "implemented / 8 files / 11 passing tests" note was inaccurate and has been removed.)
+
+- Deterministic, **LLM-free** layer sitting between Node One and Node Two. It answers one honest question before two more nodes run: *is this brief buildable at this budget given live in-stock inventory?*
+- **Direction:** look up minimum/target hardware requirements per `software` entry, aggregate component-level floors across the workload, translate to a minimum buildable + compatible + in-stock cost (respecting `hard_constraints`, which can themselves raise the floor), and compare to budget.
+- **Verdict model — OPEN ❓:** to be settled in the dedicated Feasibility session. Two candidates on the table:
+  - **binary** feasible / infeasible + cost bounds (lower bound gates the impossible, realistic minimum gates the uncomfortable), or
+  - **three-state** comfortable / tight-but-possible / impossible.
+- **Known placeholders (when built):** realistic-min buffer, non-component cost estimates, reused-parts compatibility stubs (consume PC-of-record data from the Brief — see Appendix A).
+- **Design deferred to its own session** (per this session's decision to switch context for it).
 
 ### 2.3 Node Two — Budget Allocation Agent 🔒
 
@@ -52,6 +64,8 @@ flowchart TD
 **Deterministic pre-steps (before the agent runs):**
 1. Generate the shopping list by cross-referencing the brief's existing/reused parts against the full component list — only components that need to be purchased proceed.
 2. Subtract fixed costs (OS license, specified monitor, peripherals). Node Two only allocates the remaining **core-component pool**.
+
+> The Brief now carries these fixed-cost inputs explicitly — `operating_system`, `monitor`, and `peripherals` sections (Appendix A) — which the fixed-cost subtraction reads.
 
 **Three inputs:**
 1. **Default allocation profile** — per-use-case skew predetermined by Karma Computers (gaming → GPU, editing → VRAM + storage, ML → RAM + GPU VRAM, programming → CPU + RAM).
@@ -117,8 +131,8 @@ flowchart LR
 
 | Stage | Produces | Shape / notes |
 |---|---|---|
-| Node One | User Build Brief | JSON; budget + primary use case mandatory; includes existing/reused parts |
-| Feasibility Check | feasible / infeasible + cost bounds | lower bound (impossible) + realistic minimum (uncomfortable) |
+| Node One | User Build Brief | JSON; budget + primary use case mandatory; now also carries software/workload, monitor, peripherals, storage, OS, existing/reused parts, and pinned `hard_constraints` — full schema in **Appendix A** |
+| Feasibility Check | verdict + cost figures | verdict model OPEN ❓ (binary feasible/infeasible + bounds, or comfortable/tight/impossible) — settled in the Feasibility session |
 | Node Two pre-steps | shopping list + core budget pool | deterministic; fixed costs already subtracted |
 | Node Two | price bands | JSON low/mid/high INR per shopping-list component |
 | Node Three | build card | human-readable summary; product IDs sent to backend on confirm |
@@ -138,6 +152,12 @@ flowchart LR
 
 | Decision | Reasoning |
 |---|---|
+| Conversation-first intake over guided wizard | Build-requirement space is combinatorial (can't enumerate branches); conversation is the agentic thesis; reversible since both modes emit the identical Brief, so a wizard can be added later as additive UI. |
+| Structured questions, freeform paragraph answers | Keeps conversational feel while bounding each turn's scope — easier extraction, cleaner state, lower token use than reverse-engineering one long dump. |
+| Static (non-branching) question set | Answers drive downstream nodes, not which questions are asked; avoids the wizard's hand-authored branch explosion. Only exception is ask-if-ambiguous clarifications. |
+| Budget + primary use case as the proceed floor | With those two a build estimate is possible; they're the gate to proceed. Everything else is the rest of one fixed pre-prepared set, asked in full unless the user says "done" / "stop" (no arbitrary question cap). |
+| Hard constraints captured via a final open-ended question + pinned block | Non-negotiables (no-RGB, SFF, brand bans) live in structured pinned state separate from the prose summary, so they survive compaction and are never re-suggested. |
+| Node One does no feasibility/contradiction check | It has no tier/benchmark data; its only jobs are asking and forming valid JSON. Feasibility Check is the arbiter. |
 | Motherboard selected after GPU/CPU/RAM | Prevents over-constraining the build; the board adapts to anchors rather than driving them. |
 | Fitness thresholds derived once upfront | Avoids redundant per-slot LLM calls; thresholds live in build state. |
 | Product-level graph nodes | Board-partner variants of the same chip differ enough in real-world performance to warrant individual nodes. |
@@ -154,7 +174,8 @@ flowchart LR
 - **Knowledge graph (next session):** Cypher query patterns, Neo4j schema implementation, benchmark data sourcing, weight rubric design.
 - **Fitness weights (open ❓):** precise decimals vs coarse buckets? Scope `good_for` weights to use-case alone, or use-case + resolution-tier pairs?
 - **Node Three refinement loop:** implementation.
-- **Feasibility placeholders to resolve:** realistic-min buffer logic, non-component cost estimates, reused-parts compatibility stubs (need PC-of-record data from Node One).
+- **Feasibility Check (its own session):** full design is pending — verdict model (binary vs three-state), the per-software requirement-lookup mechanism, floor aggregation across mixed workloads, minimum-buildable-cost computation against live stock, and verdict thresholds. Then the placeholders: realistic-min buffer logic, non-component cost estimates, reused-parts compatibility stubs (the Brief now defines the PC-of-record data these need — see `existing.existing_pc_build_id` and `existing.reuse_parts` in Appendix A).
+- **Node One retry policy:** exact malformed/non-conformant retry count and escalation path — deferred to testing.
 - **Context window management strategy:** flagged as its own dedicated session topic.
 
 ---
@@ -172,6 +193,131 @@ flowchart LR
 | Product search | Meilisearch |
 | ERP integration | Tally ERP via XML/ODBC |
 | Software specs retrieval | Runtime web search (Steam, Epic Games, official vendor pages) |
+
+---
+
+## Appendix A — User Build Brief schema 🔒
+
+The single structured artifact Node One emits and every downstream stage reads. A **living object**, re-filled in place on send-back / build-edit. **No prices stored.**
+
+**Conventions**
+- **Every field carries a `source` flag:** `user_stated | inferred | default_applied | skipped_by_user` — so any node can tell a real answer from an assumption, and re-engagement can target only `inferred` / `skipped` fields.
+- **Field tiers:** `required` (blocks lock — the must-ask budget + primary use case), `ask_if_ambiguous`, `optional` (skippable → explicit default).
+- **Soft vs hard:** preference fields (purpose, physical, longevity, extras) are soft signals the LLM weighs; the `hard_constraints` block is non-negotiable, **pinned, and never compacted**.
+
+```yaml
+# 0 — Envelope
+brief_id, user_id, chat_id, build_id, schema_version
+status: draft | locked | revisiting
+completeness: { required_complete: bool, optional_filled: int, optional_skipped: int }
+open_questions: [string]            # drives follow-ups
+created_at, updated_at
+
+# 1 — Budget (REQUIRED)
+budget:
+  currency: INR
+  comfortable_min: int
+  comfortable_max: int
+  ceiling: int                      # max stretch
+  scope: pc_only | pc_plus_monitor | pc_plus_peripherals | full_setup
+  notes: string | null
+
+# 2 — Purpose (REQUIRED)
+purpose:
+  primary_use_case: gaming | content_creation | work_productivity | storage_homeserver | general_use
+  sub_case: string                  # competitive_fps | open_world_aaa | video_editing | 3d_modeling | music_production | ...
+  secondary_use_cases: [ { use_case, weight: low|medium|high } ]
+
+# 3 — Software & workload  — drives requirement floors at the feasibility gate
+software:
+  - name: string                    # "Red Dead Redemption 2", "Premiere Pro", "Blender", "VS Code"
+    category: game | video | 3d | audio | dev | other
+    frequency: primary | secondary | occasional
+    intensity: casual | moderate | heavy
+
+# 4 — Performance targets (required for gaming, else optional)
+performance:
+  target_resolution: 1080p | 1440p | 4K | null
+  target_framerate: int | "max"
+  hdr_wanted: bool                  # default false
+  source: <flag>
+
+# 5 — Monitor (single source of truth)
+monitor:
+  owned: yes | no
+  owned_specs: { resolution, refresh_hz, hdr, size_inch } | null   # if owned
+  target_specs: { resolution, refresh_hz, hdr } | null             # if not owned and in scope
+  count: int                        # default 1
+  source: <flag>
+
+# 6 — Peripherals (meaningful only when budget.scope includes peripherals)
+peripherals:
+  - type: keyboard | mouse | headset | mic | speakers | drawing_tablet | controller | webcam
+    requirements: string | null     # "mechanical, low-latency", "high DPI wireless"
+    priority: must_have | nice_to_have
+
+# 7 — Storage (Node Two must size this)
+storage:
+  capacity_gb: int | null
+  speed_tier: nvme | sata_ssd | hdd | mixed
+  data_profile: cold | warm | hot | mixed
+  source: <flag>
+
+# 8 — Operating system (real budget line + affects part selection)
+operating_system:
+  os: windows | linux | dual_boot | none_reuse
+  license: oem | retail | byo | na
+  source: <flag>
+
+# 9 — Existing assets & ecosystem (REQUIRED to ask)
+existing:
+  has_existing_parts: yes | no
+  reuse_parts: [ { slot, identifier, action: keep|replace } ]
+  existing_pc_build_id: uuid | null # PC-of-record for upgrades
+  ecosystem_prefs: { cpu_brand_pref, gpu_brand_pref }   # SOFT
+
+# 10 — Physical & environment (optional → defaults)
+physical:
+  form_factor_pref: full_tower | atx_mid | compact_matx | sff_itx | no_preference
+  noise_tolerance: silent_priority | balanced | dont_care
+  placement: open_desk | enclosed_cabinet | hot_room | normal
+  portability_need: bool
+  size_notes: string | null
+
+# 11 — Reliability & longevity (optional → defaults)
+longevity:
+  reliability_priority: consumer | high_stability_alwayson | mission_critical
+  upgrade_path: future_proof | balanced | set_and_forget
+  timeline: buy_now | flexible_for_deals
+
+# 12 — Aesthetics & extras (optional → defaults)
+extras:
+  rgb_pref: want_rgb | minimal | none | no_preference
+  visual_style: showcase_glass | clean_sleeper | no_preference
+  connectivity_needs: [wifi | bluetooth | thunderbolt | 10gbe | many_usb]
+  specific_part_requests: [ { slot, requested } ]   # SOFT, validated vs live stock
+
+# 13 — Hard constraints (PINNED, never compacted, append-only unless retracted)
+hard_constraints:
+  must_have:   [ { id, type, value, source: user_stated|derived, locked_at } ]
+  must_not:    [ { id, type, value, source, locked_at } ]
+  rejected_parts: [ { product_id, reason, rejected_at } ]   # Node Three must never re-surface
+```
+
+**Consumer map**
+
+| Stage | Reads |
+|---|---|
+| Feasibility Check | budget, purpose, software, performance, hard_constraints (size/form-factor raise the floor) |
+| Node Two | budget, full purpose, software, performance, monitor + peripherals + OS (fixed-cost subtraction), existing.reuse_parts, longevity, hard_constraints |
+| Node Three | everything — esp. software, ecosystem_prefs, extras, connectivity, hard_constraints, rejected_parts, reuse_parts |
+
+**Mutability / re-fill rules**
+- Reloaded and updated in place on send-back; `status → revisiting`, `open_questions` repopulated.
+- Required fields may be revised but are never null once locked.
+- `hard_constraints` accumulate across the session (append-only unless retracted) and are the one block guaranteed to survive compaction.
+- Editing a saved build seeds a fresh Brief from the build's `intent_snapshot` + part list.
+- A skipped optional field is recorded as `source: default_applied` (or `skipped_by_user`) — never silently assumed.
 
 ---
 
