@@ -11,9 +11,10 @@ and falls back to clearly-labelled stubs so the pipeline runs skeletally now.
 Stubs drop out automatically once the real modules land.
 
 Usage:
-  python run_pipeline.py               # full conversational run
-  python run_pipeline.py --fixture     # skip intake, load budget_gamer.json demo
-  python run_pipeline.py --help        # print this message and exit
+  python run_pipeline.py                                    # full conversational run
+  python run_pipeline.py --fixture data/fixtures/budget_gamer.json
+  python run_pipeline.py --fixture-all                      # run all 3 fixtures, print summary
+  python run_pipeline.py --help                             # print this message and exit
 """
 from __future__ import annotations
 
@@ -67,7 +68,13 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
-_FIXTURE_PATH = Path(__file__).parent / "data" / "fixtures" / "budget_gamer.json"
+_FIXTURES_DIR = Path(__file__).parent / "data" / "fixtures"
+
+_FIXTURE_ALL_PATHS: dict[str, Path] = {
+    "budget_gamer":   _FIXTURES_DIR / "budget_gamer.json",
+    "video_editor":   _FIXTURES_DIR / "video_editor.json",
+    "ml_workstation": _FIXTURES_DIR / "ml_workstation.json",
+}
 
 _STUB_QUESTIONS = [
     "What is your total budget in INR for this build, and does it cover just the PC "
@@ -178,8 +185,8 @@ def _print_module_status() -> None:
     print(f"  node2_allocation  {tag(_HAS_ALLOC)}")
 
 
-def _load_fixture_brief() -> UserBuildBrief:
-    raw = _FIXTURE_PATH.read_text(encoding="utf-8")
+def _load_fixture_brief(path: Path) -> UserBuildBrief:
+    raw = path.read_text(encoding="utf-8")
     return UserBuildBrief.model_validate_json(raw)
 
 
@@ -220,6 +227,66 @@ def _print_price_bands(bands: PriceBands) -> None:
     )
 
 # ---------------------------------------------------------------------------
+# Fixture-all helpers
+# ---------------------------------------------------------------------------
+
+def _run_fixture_quiet(
+    label: str,
+    brief: UserBuildBrief,
+) -> tuple[FeasibilityVerdict | None, PriceBands | None]:
+    """Run feasibility + allocation for one fixture without sys.exit on impossible."""
+    if _HAS_ESTIMATE:
+        try:
+            verdict = estimate_feasibility(brief)
+        except Exception as exc:
+            print(f"  [{label}] estimate_feasibility raised {type(exc).__name__}: {exc}")
+            verdict = _stub_estimate_feasibility(brief)
+    else:
+        verdict = _stub_estimate_feasibility(brief)
+
+    if verdict.verdict == "impossible":
+        return verdict, None
+
+    if _HAS_ALLOC:
+        try:
+            bands = allocate_budget(brief)
+        except Exception as exc:
+            print(f"  [{label}] allocate raised {type(exc).__name__}: {exc}")
+            bands = _stub_allocate(brief)
+    else:
+        bands = _stub_allocate(brief)
+
+    return verdict, bands
+
+
+def _print_fixture_summary(
+    results: list[tuple[str, FeasibilityVerdict | None, PriceBands | None]],
+) -> None:
+    col = (16, 13, 18, 12, 12, 12)
+    header = (
+        f"  {'Fixture':<{col[0]}}{'Verdict':<{col[1]}}{'Binding':<{col[2]}}"
+        f"{'total_low':>{col[3]}}{'total_mid':>{col[4]}}{'total_high':>{col[5]}}"
+    )
+    rule = "  " + "-" * sum(col)
+    print(header)
+    print(rule)
+    for label, verdict, bands in results:
+        v_str  = verdict.verdict if verdict else "error"
+        b_str  = verdict.binding_constraint or "—" if verdict else "—"
+        if bands:
+            lo  = _inr(bands.total_low())
+            mid = _inr(bands.total_mid())
+            hi  = _inr(bands.total_high())
+        else:
+            lo = mid = hi = "n/a"
+        print(
+            f"  {label:<{col[0]}}{v_str:<{col[1]}}{b_str:<{col[2]}}"
+            f"{lo:>{col[3]}}{mid:>{col[4]}}{hi:>{col[5]}}"
+        )
+    print(rule)
+
+
+# ---------------------------------------------------------------------------
 # Phase functions
 # ---------------------------------------------------------------------------
 
@@ -228,7 +295,7 @@ def run_intake(state: PipelineState) -> PipelineState:
 
     if not _HAS_NODE1:
         print("  [STUB] node1_intake not available  -  loading fixture brief (budget_gamer.json).")
-        state = {**state, "current_brief": _load_fixture_brief()}
+        state = {**state, "current_brief": _load_fixture_brief(_FIXTURE_ALL_PATHS["budget_gamer"])}
     else:
         # Initialise a blank brief; IDs are session-scoped placeholders.
         initial_brief = blank_brief(
@@ -428,7 +495,18 @@ def main() -> None:
         print(__doc__)
         sys.exit(0)
 
-    use_fixture = "--fixture" in args
+    fixture_all = "--fixture-all" in args
+
+    fixture_path: Path | None = None
+    if "--fixture" in args:
+        idx = args.index("--fixture")
+        if idx + 1 >= len(args) or args[idx + 1].startswith("--"):
+            print("  [ERROR] --fixture requires a path argument, e.g. --fixture data/fixtures/budget_gamer.json")
+            sys.exit(1)
+        fixture_path = Path(__file__).parent / args[idx + 1]
+        if not fixture_path.exists():
+            print(f"  [ERROR] Fixture not found: {fixture_path}")
+            sys.exit(1)
 
     print(f"\n{_SEP}")
     print("  KARMA AI   -   PC Build Recommendation  (Phase 1 Pipeline)")
@@ -436,13 +514,40 @@ def main() -> None:
 
     _print_module_status()
 
+    # ------------------------------------------------------------------
+    # --fixture-all  :  run all three canonical fixtures, print table
+    # ------------------------------------------------------------------
+    if fixture_all:
+        print(f"\n  FIXTURE MODE — skipping intake")
+        print(f"  Running all {len(_FIXTURE_ALL_PATHS)} fixtures through feasibility + allocation.\n")
+        summary: list[tuple[str, FeasibilityVerdict | None, PriceBands | None]] = []
+        for label, path in _FIXTURE_ALL_PATHS.items():
+            _print_header(f"FIXTURE: {label}")
+            brief = _load_fixture_brief(path)
+            verdict, bands = _run_fixture_quiet(label, brief)
+            if verdict:
+                _print_verdict(verdict)
+            if bands:
+                print("\n  Price bands per component (INR):\n")
+                _print_price_bands(bands)
+            summary.append((label, verdict, bands))
+
+        _print_header("SUMMARY")
+        _print_fixture_summary(summary)
+        print()
+        return
+
+    # ------------------------------------------------------------------
+    # --fixture <path>  :  single fixture, full output
+    # ------------------------------------------------------------------
     state = new_state()
 
-    if use_fixture:
-        print("\n  [DEMO] --fixture flag  -  loading budget_gamer.json, skipping intake.")
+    if fixture_path is not None:
+        print(f"\n  FIXTURE MODE — skipping intake")
+        print(f"  Loading: {fixture_path.name}")
         state = {
             **state,
-            "current_brief": _load_fixture_brief(),
+            "current_brief": _load_fixture_brief(fixture_path),
             "current_node": "feasibility",
         }
     else:

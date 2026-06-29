@@ -2,7 +2,7 @@
 
 > Living design document for the Karma ai recommendation pipeline (Karma Computers).
 > **Status legend:** 🔒 Locked · 🛠️ Implemented · 🚧 In design · ❓ Open
-> _Last updated: 2026-06-26_
+> _Last updated: 2026-06-30_
 
 ---
 
@@ -187,7 +187,55 @@ flowchart LR
 
 ---
 
-## 7. Open Questions / On the Horizon 🚧
+## 7. Phase 1 Implementation Notes 🛠️
+
+### 7.1 LLM Provider
+
+DESIGN.md specifies the **Anthropic Claude API**; Phase 1 implementation uses **OpenAI `gpt-4o-mini`**. The model is configurable via the `OPENAI_MODEL` environment variable.
+
+### 7.2 Conversation Loop Architecture
+
+Node 1 does **not** own the conversation loop. The CLI harness (`run_pipeline.py`) drives the loop turn-by-turn. Node 1 exposes a stateless API:
+
+- `blank_brief()` — returns an empty Brief skeleton.
+- `floor_met(brief)` — returns True when the proceed gate is satisfied.
+- `next_question(brief, asked_so_far)` — returns the next question string, or `None` when all questions are exhausted.
+- `extract_turn(answer, brief, history)` — runs LLM extraction for one turn and returns the updated Brief.
+- `newly_filled_sections(old_brief, new_brief)` — diff helper for reporting what changed.
+
+This keeps Node 1 stateless and independently testable.
+
+### 7.3 LLM Arithmetic Constraint — Locked Decision 🔒
+
+Asking the LLM to produce exact INR band values across nine component slots fails arithmetic constraints reliably.
+
+**Locked pattern:** the LLM produces **relative weights only** → Python computes INR values deterministically using **largest-remainder normalization** on 500-INR tokens. Sums hold by construction, not by asking the LLM to do arithmetic. `_distribute()` and `_compute_bands()` in `node2_allocation.py` implement this.
+
+### 7.4 Feasibility Check — Live Price Anchor
+
+One live Postgres price anchor (cheapest in-stock GPU from the catalog) is injected into the LLM prompt. Without it, verdicts are pessimistic — the model over-estimates GPU cost using stale priors.
+
+- The Supabase **direct host** (`db.<ref>.supabase.co`) is retired; the **Session Pooler URL** must be used.
+- `get_min_catalog_price` returns `0` on DB failure; `estimate.py` flags the anchor as `UNAVAILABLE` in the prompt and continues rather than aborting.
+
+### 7.5 Software Extraction — Intensity/Frequency Rules 🔒
+
+Default `gpt-4o-mini` behaviour marks all software as moderate intensity and ignores stated primary/secondary use-case priority when assigning frequency. Explicit prompt rules are required.
+
+**Locked rules added to `_EXTRACT_SYSTEM`:**
+- AAA titles and local LLMs → `heavy` intensity.
+- Frequency derives from stated use-case priority, not software count.
+
+### 7.6 floor_met() Definition
+
+DESIGN.md defines the proceed floor as *budget + primary_use_case*. The implementation relaxes the budget side to match what the Brief actually captures:
+
+- **Gate condition:** `comfortable_max > 0` **AND** `primary_use_case` non-empty.
+- `sub_case` is **not** required for floor — it is optional metadata.
+
+---
+
+## 8. Open Questions / On the Horizon 🚧
 
 - **Knowledge graph (next session):** Cypher query patterns, Neo4j schema implementation, benchmark data sourcing, weight rubric design.
 - **Fitness weights (open ❓):** precise decimals vs coarse buckets? Scope `good_for` weights to use-case alone, or use-case + resolution-tier pairs?
@@ -198,7 +246,7 @@ flowchart LR
 
 ---
 
-## 8. Tech Stack
+## 9. Tech Stack
 
 | Layer | Technology |
 |---|---|
