@@ -57,6 +57,14 @@ class PostgresClient:
             row = cur.fetchone()
             return int(row[0]) if row and row[0] is not None else 0
 
+    def get_all_products(self) -> list[dict]:
+        with _cursor() as cur:
+            cur.execute(
+                "SELECT * FROM catalog ORDER BY category, product_id"
+            )
+            columns = [desc[0] for desc in cur.description]
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+
     def get_parts_in_band(
         self,
         slot: ComponentSlot,
