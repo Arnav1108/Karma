@@ -58,7 +58,7 @@ except ImportError:
     _HAS_ESTIMATE = False
 
 try:
-    from agents.nodes.node2_allocation import allocate
+    from agents.nodes.node2_allocation import allocate_budget
     _HAS_ALLOC = True
 except ImportError:
     _HAS_ALLOC = False
@@ -398,7 +398,7 @@ def run_allocation(state: PipelineState) -> PipelineState:
 
     if _HAS_ALLOC:
         try:
-            bands = allocate(brief)
+            bands = allocate_budget(brief)
         except Exception as exc:
             print(f"  [WARNING] allocate raised {type(exc).__name__}: {exc}")
             print("  [FALLBACK] Using stub price bands.")
