@@ -1,5 +1,6 @@
 import os
 from contextlib import contextmanager
+from urllib.parse import urlparse
 
 from psycopg2.pool import ThreadedConnectionPool
 
@@ -12,7 +13,18 @@ def _get_pool() -> ThreadedConnectionPool:
     global _pool
     if _pool is None:
         url = os.environ["POSTGRES_URL"]
-        _pool = ThreadedConnectionPool(minconn=1, maxconn=10, dsn=url)
+        try:
+            _pool = ThreadedConnectionPool(minconn=1, maxconn=10, dsn=url)
+        except Exception as e:
+            host = urlparse(url).hostname or "<unknown>"
+            raise RuntimeError(
+                f"[Karma DB] Cannot connect to Postgres. Your POSTGRES_URL may be using the "
+                f"legacy Supabase direct host (db.<ref>.supabase.co) which has been retired. "
+                f"Update it to the Session Pooler URL from: "
+                f"Supabase Dashboard → Connect → Session pooler.\n"
+                f"Current host: {host}\n"
+                f"Original error: {e}"
+            ) from e
     return _pool
 
 
