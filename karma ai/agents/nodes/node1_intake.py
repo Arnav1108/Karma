@@ -63,20 +63,20 @@ _EXTRACT_SYSTEM = (
     "defaults. "
     "For fields that carry a 'source' key, set source to 'user_stated' whenever you "
     "fill that field.\n\n"
-    "SOFTWARE INTENSITY — calibrate each software entry's 'intensity' using these anchors:\n"
-    "- heavy: AAA titles (open-world and/or realistic graphics, e.g. RDR2, GTA, "
-    "Cyberpunk), any local ML/LLM inference, 3D rendering, and video editing at high "
-    "resolution. Also: if the user targets 1440p, 4K, high framerates, or HDR for a "
-    "game, that game is heavy — not moderate.\n"
-    "- moderate: indie games, older titles, light productivity apps, casual gaming.\n"
-    "- casual: browsing, office work, video playback.\n\n"
+    "Intensity MUST follow these rules — do not default to moderate:\n"
+    "- heavy: AAA open-world or realistic games (RDR2, GTA, Cyberpunk, Elden Ring etc), "
+    "any local ML/LLM inference, PyTorch/CUDA training, 3D rendering, video editing "
+    "at high resolution. If the user mentions 1440p/4K or high framerates for a game, "
+    "that game is heavy.\n"
+    "- moderate: indie games, older/less demanding titles, light productivity, casual gaming.\n"
+    "- casual: browsing, office work, media playback.\n\n"
     "FREQUENCY RULE (non-negotiable): The user's primary/secondary USE-CASE declaration "
-    "is the sole authority for frequency. If the user said 'primary X, secondary Y':\n"
-    "- ALL software entries that belong to use-case Y MUST be frequency=secondary, "
-    "regardless of how many titles they mentioned or how casually they described use-case X.\n"
-    "- Do NOT infer frequency from how much software was listed per category.\n"
-    "- Example: 'primary work, secondary gaming' -> all games = secondary, even if 3 games "
-    "were listed and only 1 work app."
+    "is the sole authority for frequency assignment.\n"
+    "- If the user said 'primary X, secondary Y': ALL software belonging to use-case Y "
+    "MUST be frequency=secondary, regardless of how many titles they listed.\n"
+    "- Do NOT infer frequency from how much software was named per category.\n"
+    "- Example: 'primary work, secondary gaming' means all games = secondary even if "
+    "3 games were listed and only 1 work app."
 )
 
 # ---------------------------------------------------------------------------
@@ -309,7 +309,7 @@ def blank_brief(
 
 def floor_met(brief: UserBuildBrief) -> bool:
     """Return True when budget AND primary use case are filled (the proceed gate)."""
-    return brief.budget.comfortable_max > 0 and bool(brief.purpose.sub_case)
+    return brief.budget.comfortable_max > 0 and brief.purpose.primary_use_case is not None and brief.purpose.primary_use_case != ""
 
 # ---------------------------------------------------------------------------
 # _is_field_filled() — internal
