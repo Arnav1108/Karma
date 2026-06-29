@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import TypedDict
 
 from agents.schemas import (
     BuildCard,
-    ComponentSlot,
     FeasibilityVerdict,
     PriceBands,
     UserBuildBrief,
@@ -17,16 +16,18 @@ class PipelineState(TypedDict, total=False):
     feasibility_verdict: FeasibilityVerdict
     price_bands: PriceBands
     build_card: BuildCard
-    locked_parts: dict[ComponentSlot, dict[str, Any]]
-    remaining_budget: int
-    fitness_thresholds: dict[ComponentSlot, float]
-    current_node: str
+    locked_parts: dict[str, str] | None          # slot name → product_id
+    remaining_budget: int | None
+    fitness_thresholds: dict[str, float] | None  # slot name → threshold
+    error_message: str | None                    # for routing failures
+    current_node: str | None
 
 
 def new_state() -> PipelineState:
     return PipelineState(
         conversation_history=[],
-        locked_parts={},
-        fitness_thresholds={},
-        current_node="node1",
+        locked_parts=None,
+        fitness_thresholds=None,
+        error_message=None,
+        current_node="node_intake",
     )
