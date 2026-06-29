@@ -17,7 +17,9 @@ Usage:
 """
 from __future__ import annotations
 
+import datetime
 import sys
+import uuid
 from pathlib import Path
 
 # Bootstrap path so `agents.*` resolves from this script's directory.
@@ -37,7 +39,14 @@ from agents.state.pipeline_state import PipelineState, new_state  # noqa: E402
 # ---------------------------------------------------------------------------
 
 try:
-    from agents.nodes.node1_intake import extract_turn, next_question
+    from agents.nodes.node1_intake import (
+        QUESTION_SEQUENCE,
+        blank_brief,
+        extract_turn,
+        floor_met,
+        newly_filled_sections,
+        next_question,
+    )
     _HAS_NODE1 = True
 except ImportError:
     _HAS_NODE1 = False
@@ -87,28 +96,32 @@ _STUB_BANDS_INR: dict[str, dict[str, int]] = {
 # Each stub has the expected real interface documented so wiring is drop-in.
 # ---------------------------------------------------------------------------
 
-def _stub_next_question(state: PipelineState) -> str | None:
+def _stub_next_question(brief: UserBuildBrief, asked_so_far: set[str]) -> str | None:
     # TODO: Remove when agents/nodes/node1_intake.py merges.
     # EXPECTED INTERFACE:
-    #   next_question(state: PipelineState) -> str | None
-    #   Returns the next question from the pre-prepared set, or None when
-    #   the full set is exhausted (Brief locks on None return).
-    history = state.get("conversation_history") or []
-    asked = sum(1 for m in history if m.get("role") == "assistant")
-    return _STUB_QUESTIONS[asked] if asked < len(_STUB_QUESTIONS) else None
+    #   next_question(brief: UserBuildBrief, asked_so_far: set[str]) -> str | None
+    #   Walks the static QUESTION_SEQUENCE, skips IDs in asked_so_far or already
+    #   filled in the brief, calls call_text() to phrase the next question, or
+    #   returns None when all questions are exhausted.
+    asked_count = len(asked_so_far)
+    return _STUB_QUESTIONS[asked_count] if asked_count < len(_STUB_QUESTIONS) else None
 
 
-def _stub_extract_turn(state: PipelineState, user_input: str) -> PipelineState:
+def _stub_extract_turn(
+    user_answer: str,
+    current_brief: UserBuildBrief,
+    conversation_history: list[dict],
+) -> UserBuildBrief:
     # TODO: Remove when agents/nodes/node1_intake.py merges.
     # EXPECTED INTERFACE:
-    #   extract_turn(state: PipelineState, user_input: str) -> PipelineState
-    #   LLM extracts structured fields from user_input, merges them into
-    #   state["current_brief"], appends {"role": "user", "content": user_input}
-    #   to state["conversation_history"], and returns the updated PipelineState.
-    #   Two-stage validation: JSON syntax -> schema + enum conformance.
-    history = list(state.get("conversation_history") or [])
-    history.append({"role": "user", "content": user_input})
-    return {**state, "conversation_history": history}
+    #   extract_turn(user_answer: str, current_brief: UserBuildBrief,
+    #                conversation_history: list[dict]) -> UserBuildBrief
+    #   LLM extracts structured fields from user_answer using conversation_history
+    #   as context, merges into current_brief via _merge_delta, recomputes
+    #   completeness, and returns the updated UserBuildBrief.
+    #   On early-exit signal ("done"/"stop") + floor met: locks the brief immediately.
+    #   On StructuredCallError: returns current_brief unchanged.
+    return current_brief
 
 
 def _stub_estimate_feasibility(brief: UserBuildBrief) -> FeasibilityVerdict:
@@ -216,10 +229,40 @@ def run_intake(state: PipelineState) -> PipelineState:
     if not _HAS_NODE1:
         print("  [STUB] node1_intake not available  -  loading fixture brief (budget_gamer.json).")
         state = {**state, "current_brief": _load_fixture_brief()}
+    else:
+        # Initialise a blank brief; IDs are session-scoped placeholders.
+        initial_brief = blank_brief(
+            brief_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            chat_id=uuid.uuid4(),
+        )
+        state = {**state, "current_brief": initial_brief}
 
+    # asked_so_far: set of question IDs already put to the user this session.
+    # next_question uses this (+ _is_field_filled) to skip already-covered ground.
+    asked_so_far: set[str] = set()
     turn_count = 0
+
     while True:
-        question = next_question(state) if _HAS_NODE1 else _stub_next_question(state)
+        brief = state["current_brief"]
+
+        if _HAS_NODE1:
+            question = next_question(brief, asked_so_far)
+            # Identify which question ID is being asked — first in the ordered
+            # sequence not yet in asked_so_far (mirrors next_question's own walk).
+            current_q_id: str | None = next(
+                (q.id for q in QUESTION_SEQUENCE if q.id not in asked_so_far),
+                None,
+            )
+        else:
+            asked_count = len(asked_so_far)
+            question = (
+                _STUB_QUESTIONS[asked_count]
+                if asked_count < len(_STUB_QUESTIONS)
+                else None
+            )
+            current_q_id = f"_stub_{asked_count}"
+
         if question is None:
             print("\n  All questions answered  -  locking Brief.")
             break
@@ -235,34 +278,77 @@ def run_intake(state: PipelineState) -> PipelineState:
             print("  (Empty input  -  please answer or type 'done' to finish early.)")
             continue
 
-        if user_input.lower() in ("done", "stop", "exit"):
-            brief = state.get("current_brief")
-            if brief is not None and brief.completeness.required_complete:
-                print("  Early exit accepted  -  required fields complete.")
-                break
-            print(
-                "  Budget and primary use case must be filled before stopping. "
-                "Please continue."
-            )
-            continue
-
-        # Append the assistant's question to history BEFORE calling extract_turn
-        # so the LLM sees both sides of the exchange.
+        # Append the assistant question to history BEFORE extract_turn so the
+        # LLM receives full context (question + answer) in the same call.
         history = list(state.get("conversation_history") or [])
         history.append({"role": "assistant", "content": question})
         state = {**state, "conversation_history": history}
 
         if _HAS_NODE1:
-            state = extract_turn(state, user_input)
+            old_brief = brief
+            # extract_turn(user_answer, current_brief, conversation_history) -> UserBuildBrief
+            # It also handles "done"/"stop" exit: locks the brief when floor is met.
+            brief = extract_turn(
+                user_input,
+                brief,
+                state.get("conversation_history") or [],
+            )
+            # Append user answer to history after extraction (it was context, not input).
+            history = list(state.get("conversation_history") or [])
+            history.append({"role": "user", "content": user_input})
+            state = {**state, "current_brief": brief, "conversation_history": history}
+
+            # Mark this question as asked so next_question doesn't re-ask it.
+            if current_q_id:
+                asked_so_far.add(current_q_id)
+
+            # Opportunistic fill: if the user volunteered answers to later questions,
+            # mark those IDs as covered so they're skipped automatically.
+            asked_so_far.update(newly_filled_sections(old_brief, brief))
+
+            # extract_turn locks the brief on "done"/"stop" when floor_met() is True.
+            if brief.status == "locked":
+                print("  Early exit accepted  -  brief locked.")
+                break
         else:
-            state = _stub_extract_turn(state, user_input)
+            # Stub path: extract_turn returns brief unchanged; harness owns history.
+            history = list(state.get("conversation_history") or [])
+            history.append({"role": "user", "content": user_input})
+            brief = _stub_extract_turn(
+                user_input,
+                brief,
+                history,
+            )
+            state = {**state, "current_brief": brief, "conversation_history": history}
+
+            if current_q_id:
+                asked_so_far.add(current_q_id)
+
+            # Stub: handle "done"/"stop" manually (extract_turn doesn't do it).
+            if user_input.lower() in ("done", "stop"):
+                if brief.completeness.required_complete:
+                    print("  Early exit accepted  -  required fields complete.")
+                    break
+                print(
+                    "  Budget and primary use case must be filled before stopping. "
+                    "Please continue."
+                )
+                continue
 
         turn_count += 1
 
+    # Lock brief if the question set exhausted naturally (extract_turn only locks on
+    # early exit; the normal end-of-sequence path leaves status as "draft").
+    brief = state["current_brief"]
+    if brief.status != "locked":
+        data = brief.model_dump()
+        data["status"] = "locked"
+        data["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        brief = UserBuildBrief.model_validate(data)
+        state = {**state, "current_brief": brief}
+
     state = {**state, "current_node": "feasibility"}
-    brief = state.get("current_brief")
-    status = brief.status if brief else "unknown"
-    print(f"\n  Brief status: {status}  |  Turns: {turn_count}")
+    print(f"\n  Brief status: {brief.status}  |  Turns: {turn_count}")
     return state
 
 
