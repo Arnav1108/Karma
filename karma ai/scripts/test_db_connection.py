@@ -23,14 +23,14 @@ try:
     print(f"[Karma DB] Connection OK — host: {host}")
 
     cur.execute(
-        "SELECT slot, COUNT(*), MIN(price_inr) FROM catalog GROUP BY slot ORDER BY slot"
+        "SELECT category, COUNT(*), MIN(price_inr) FROM catalog GROUP BY category ORDER BY category"
     )
     rows = cur.fetchall()
     if rows:
-        print(f"\n{'Slot':<30} {'Count':>6} {'Min price (INR)':>16}")
+        print(f"\n{'Category':<30} {'Count':>6} {'Min price (INR)':>16}")
         print("-" * 56)
-        for slot, count, min_price in rows:
-            print(f"{slot:<30} {count:>6} {min_price:>16}")
+        for category, count, min_price in rows:
+            print(f"{category:<30} {count:>6} {min_price:>16}")
     else:
         print("[Karma DB] WARNING: catalog table is empty — run the seed script.")
 

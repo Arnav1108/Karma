@@ -106,6 +106,9 @@ def _lookup_base_floor(name: str, category: str) -> BaseFloor:
 
 _RES_GPU_BUMP_STUB = {"1080p": 0, "1440p": 1, "4K": 2}   # STUB: GPU tier levels
 _RES_VRAM_BUMP_STUB = {"1080p": 0, "1440p": 2, "4K": 4}  # STUB: extra VRAM (GB)
+# STUB: per-resolution GPU tier ceiling. Prevents a high-fps bump from pushing
+# a mid-intensity game (e.g. GTA V at 1080p) past the ceiling for that resolution.
+_RES_GPU_CAP_STUB = {"1080p": GpuTier.mid, "1440p": GpuTier.high, "4K": GpuTier.enthusiast}
 
 
 def _apply_performance(floor: BaseFloor, perf) -> BaseFloor:
@@ -119,6 +122,9 @@ def _apply_performance(floor: BaseFloor, perf) -> BaseFloor:
     fps = perf.target_framerate
     if fps == "max" or (isinstance(fps, int) and fps >= 144):
         gpu = _bump(gpu, 1)
+    cap = _RES_GPU_CAP_STUB.get(res)
+    if cap is not None and int(gpu) > int(cap):
+        gpu = cap
     return BaseFloor(
         gpu_tier=gpu,
         cpu_tier=floor.cpu_tier,

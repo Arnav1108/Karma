@@ -3,6 +3,8 @@
 > Living design document for the Karma ai recommendation pipeline (Karma Computers).
 > **Status legend:** 🔒 Locked · 🛠️ Implemented · 🚧 In design · ❓ Open
 > _Last updated: 2026-06-30_
+>
+> **Implementation status:** Phases 0–2 code-complete and merged to `main`. The full pipeline (Node 1 → Feasibility → Node 2 → Node 3 + refinement) is built, wired into a LangGraph `StateGraph`, and exercised by an integration test suite. The system is **blocked on one environment item only** — the Supabase `POSTGRES_URL` points at the retired direct host and must be updated to the Session Pooler URL before the pipeline returns real (non-empty) results. See §10.
 
 ---
 
@@ -120,14 +122,15 @@ flowchart LR
 - **Output:** A single build (not multiple options). The **build card** is a human-readable summary of parts, prices, and justifications sent to the user for confirmation; product IDs are sent to the backend on confirmation.
 - **Failure communication:** plain English (e.g., "your budget cannot support this configuration; either lower demands or increase budget; the best available within constraints is X").
 
-**Refinement loop — Approach B (pin / open model):**
+**Refinement loop — Approach B (pin / open model):** 🛠️
 - All slots re-solve on each refinement; the compatibility validator surfaces conflicts conversationally rather than maintaining a dependency graph.
-- Budget-level changes are routed through the budget updater (Approach A tier routing).
+- Budget-level changes are routed through the budget updater (re-run `allocate_budget` with the new budget, then re-solve).
 - Brief-level changes restart at Node One.
+- **As built (`node3_refinement.py`):** a freeform user message is parsed via `call_structured` into a `RefinementRequest` (`action`, `slot`, `reason`, `new_budget`) with five actions — `pin` (lock one slot, re-solve the rest), `open` (unlock one slot, full re-solve), `swap` (append current part to `rejected_parts`, re-pick that slot), `accept` (finalize), `restart` (back to Node One). `MAX_REFINEMENT_ROUNDS = 5`.
 
 ---
 
-## 3. Knowledge Graph Design — Neo4j 🔒
+## 3. Knowledge Graph Design — Neo4j 🔒 🛠️
 
 **Two edge families:**
 1. **Compatibility family** — unweighted junction nodes. Components connect to shared spec nodes (sockets, chipsets) rather than directly to each other.
@@ -139,7 +142,12 @@ flowchart LR
 - **One node per distinct product** (not per chip model) — board-partner variants can differ meaningfully in cooling, noise, and sustained performance.
 - **Single database:** Neo4j handles both compatibility and fitness traversal. A Postgres/relational approach for compatibility was evaluated and rejected — the agentic system benefits from traversing both in the same semantic space without context switching. Compatibility edges are weightless but still traversed as graph relationships.
 
-**Pending (next session):** Cypher query patterns, schema implementation, benchmark data sourcing, weight rubric design.
+**As built:**
+- `agents/db/neo4j_schema.py` — label constants (`COMPONENT`, `SPEC`, `USE_CASE`, `PERFORMANCE`, `COMPONENT_CLASS`), node-key constraints, indexes, and an idempotent `apply_schema(driver)`.
+- `data/graph/seed_graph.py` — populates the graph from the Postgres catalog using `MERGE` throughout (idempotent). Creates `:Component` nodes; `[:BELONGS_TO]` → `:ComponentClass`; compatibility junctions (`:Spec` nodes for socket / DDR-gen / form-factor, with cooler `socket_compat`, motherboard `ddr_support`, case `form_factor` read from the catalog `specs` JSONB); weighted `[:GOOD_FOR {weight}]` → `:UseCase` edges; and `[:HAS_VRAM {gb}]` → `:Performance` for GPUs.
+- `agents/db/neo4j.py` — real parametrized Cypher (no f-strings): `compatibility_check(candidate_ids, locked_parts, candidate_slot)`, `fitness_filter(candidate_ids, use_case, threshold)` (fail-open — components with no `:GOOD_FOR` edge are kept, not dropped), `get_component_fitness(product_id, use_case)`, and `ping()` for availability detection.
+
+**Still open:** the `[:GOOD_FOR]` weights are a clearly-marked **STUB** table in `seed_graph.py` (sensible defaults, e.g. GPU→gaming 0.9, CPU→work 0.9); real benchmark-sourced weights and the precise weight rubric are deferred. A live Neo4j instance has **not** been stood up or seeded yet — Node 3 detects this via `ping()` and degrades to Postgres-only selection.
 
 ---
 
@@ -235,30 +243,84 @@ DESIGN.md defines the proceed floor as *budget + primary_use_case*. The implemen
 
 ---
 
-## 8. Open Questions / On the Horizon 🚧
+## 8. Phase 2 Implementation Notes 🛠️
 
-- **Knowledge graph (next session):** Cypher query patterns, Neo4j schema implementation, benchmark data sourcing, weight rubric design.
-- **Fitness weights (open ❓):** precise decimals vs coarse buckets? Scope `good_for` weights to use-case alone, or use-case + resolution-tier pairs?
-- **Node Three refinement loop:** implementation.
-- **Feasibility Check — remaining open items:** realistic-min buffer calibration (how much headroom separates tight from comfortable); non-component cost estimates (currently rough floor values); reused-parts compatibility stubs (need PC-of-record data from `existing.existing_pc_build_id` in Appendix A).
+### 8.1 Node 3 — Part Finder (as built)
+
+`agents/nodes/node3_selector.py` implements the three-step funnel:
+
+- `derive_fitness_thresholds(brief)` — **one** upfront `call_structured` call returning a per-slot threshold dict (stored in build state, never re-derived per slot). This call uses a **stronger model** (`gpt-4o` via `KARMA_THRESHOLD_MODEL`) because the per-slot reasoning quality drives every downstream pick; the per-slot final pick stays on `gpt-4o-mini`.
+- `select_part(slot, band, brief, locked_parts, fitness_thresholds, neo4j_available)` — Step 1 Postgres `get_parts_in_band` (with one 20%-band-widening retry on empty); Step 2 Neo4j `compatibility_check` then `fitness_filter` (skipped when `neo4j_available` is False); Step 3 `call_structured` final pick from a shortlist capped at 7.
+- `select_build(brief, price_bands)` — walks `SELECTION_ORDER` (GPU → CPU → RAM → Storage → Motherboard → PSU → Case → Cooler → Fans), skips `reuse_parts` with `action == "keep"`, tracks running budget, runs a motherboard lookahead probe after GPU+CPU lock, and re-validates compatibility after each lock.
+- **Graceful degradation (verified):** with Neo4j down *and* Postgres unreachable, `select_build` walks all nine slots, never crashes, and returns an empty `BuildCard` (every slot `None`). This is the designed degraded path — the funnel is structurally correct; only live data is missing.
+
+### 8.2 LangGraph Wiring
+
+`agents/graph.py` compiles a `StateGraph` matching the §1 flowchart: `node_intake → node_feasibility → {node_allocate → node_select → END | node_surface_failure → END}`, with conditional routing on the feasibility verdict. All node imports are **defensive** (`try/except ImportError`) so the graph compiles even if a downstream module is absent. `node_intake` is **one turn only** — designed for checkpointer resumption; the conversation loop still lives in `run_pipeline.py`, which remains the CLI driver. `agents/graph_runner.py` exposes `run_from_brief(brief, price_bands) -> PipelineState` for fixture/API invocation, pre-seeding state and entering at `node_feasibility`. This is the entry point the future API layer will call.
+
+`PipelineState` (`agents/state/pipeline_state.py`) was extended with `fitness_thresholds`, `locked_parts` (string slot names → product_id), `remaining_budget`, and `error_message`. **Note:** `locked_parts` keys are **string slot names**, not `ComponentSlot` enums, to keep the graph-state contract serializable.
+
+### 8.3 Output Formatter
+
+`agents/output/formatter.py` centralizes all user-facing text: `format_build_card`, `format_price_bands` (byte-identical to the harness's inline printer, a drop-in import), `format_impossible` (numbered adjustment list), and `format_tight_warning`. Not yet wired into `run_pipeline.py` — that's a one-import swap remaining.
+
+### 8.4 Integration Test Suite
+
+`tests/test_pipeline_integration.py` + `conftest.py` (pytest). Deterministic allocation-sum assertions pass for all three fixtures (mids→target, highs→ceiling, exact by construction); storage-exclusion and fixed-cost checks pass. Feasibility tests **skip cleanly** when Postgres is unavailable via a `db_available` session fixture. Current result: **8 passed, 2 skipped**.
+
+### 8.5 Model Allocation Policy 🔒
+
+| Call | Model | Reason |
+|---|---|---|
+| Node 1 extraction | `gpt-4o-mini` | Schema-constrained, prompt does the work |
+| Feasibility verdict | `gpt-4o-mini` | Single verdict, well-prompted |
+| Node 2 allocation skew | `gpt-4o-mini` | Weights only; Python does the math |
+| **Node 3 fitness thresholds** | **`gpt-4o`** | Multi-slot reasoning; quality drives all picks |
+| Node 3 final part pick | `gpt-4o-mini` | Constrained shortlist with explicit specs |
+| Node 3 refinement parse | `gpt-4o-mini` | Freeform → structured action |
+
+Rule of thumb: tasks requiring **reasoning about tradeoffs across multiple dimensions without explicit scaffolding** get `gpt-4o`; **schema-constrained or prompt-scaffolded** tasks stay on `gpt-4o-mini`.
+
+---
+
+## 9. Open Questions / On the Horizon 🚧
+
+**Completed since last revision** (moved out of this list): Neo4j schema + seed script, Cypher query patterns, Node 3 selection funnel, Node 3 refinement loop, LangGraph wiring, output formatter, integration test suite.
+
+**Immediate (environment, not code):**
+- **Supabase connection (BLOCKER):** `POSTGRES_URL` points at the retired direct host (`db.<ref>.supabase.co`). Update to the Session Pooler URL (Dashboard → Connect → Session pooler; username becomes `postgres.<ref>`). Verify with `python -m scripts.test_db_connection`. Until fixed, feasibility verdicts are pessimistic and Node 3 returns empty build cards.
+- **Stand up + seed Neo4j:** no live instance yet. Once running, `python -m data.graph.seed_graph` populates it; Node 3 auto-upgrades from Postgres-only to full graph filtering.
+
+**Small wiring remaining:**
+- Swap `run_pipeline.py`'s inline price-band printer for `agents.output.formatter.format_price_bands`.
+- Call `refinement_loop` after `select_build` in `run_pipeline.py` before final confirmation.
+
+**Still genuinely open:**
+- **Fitness weights (❓):** precise decimals vs coarse buckets? Scope `good_for` weights to use-case alone, or use-case + resolution-tier pairs? Current values are STUB defaults in `seed_graph.py`; real benchmark sourcing pending.
+- **Business-intelligence ranking layer (§5):** hidden margin/overstock weighting injected into Node 3's final-pick prompt; admin-configurable weights. Designed, not built — first real Phase 3 task.
+- **API layer:** `graph_runner.run_from_brief` is ready; needs a Fastify/FastAPI wrapper to expose it as an endpoint.
+- **Feasibility Check — remaining open items:** realistic-min buffer calibration (headroom separating tight from comfortable); non-component cost estimates (currently rough STUB floor values); reused-parts compatibility stubs (need PC-of-record data from `existing.existing_pc_build_id`).
 - **Node One retry policy:** exact malformed/non-conformant retry count and escalation path — deferred to testing.
 - **Context window management strategy:** flagged as its own dedicated session topic.
 
 ---
 
-## 9. Tech Stack
+## 10. Tech Stack
 
-| Layer | Technology |
-|---|---|
-| AI API | Anthropic Claude API (tool calling) |
-| Relational DB / product catalog | Supabase (managed Postgres) |
-| ORM | Prisma |
-| API layer | Fastify |
-| Knowledge graph | Neo4j |
-| Session / short-term memory | Redis |
-| Product search | Meilisearch |
-| ERP integration | Tally ERP via XML/ODBC |
-| Software specs retrieval | Runtime web search (Steam, Epic Games, official vendor pages) |
+| Layer | Planned | As built (Phase 0–2) |
+|---|---|---|
+| AI API | Anthropic Claude API (tool calling) | **OpenAI** `gpt-4o-mini` default, `gpt-4o` for fitness thresholds (`KARMA_THRESHOLD_MODEL`); shared wrapper in `agents/llm/client.py` |
+| Pipeline orchestration | — | **LangGraph** `StateGraph` (`agents/graph.py`) |
+| Relational DB / product catalog | Supabase (managed Postgres) | Supabase Postgres via `psycopg2` `ThreadedConnectionPool` (`agents/db/postgres.py`); **direct host retired → Session Pooler required** |
+| ORM | Prisma | not yet in the Python pipeline (raw SQL via psycopg2) |
+| API layer | Fastify | not yet built; `graph_runner.run_from_brief` is the ready entry point |
+| Knowledge graph | Neo4j | schema + client + seed implemented; **no live instance seeded yet** |
+| Schema validation | — | **Pydantic v2** throughout |
+| Session / short-term memory | Redis | not yet wired |
+| Product search | Meilisearch | not yet wired |
+| ERP integration | Tally ERP via XML/ODBC | not yet wired |
+| Software specs retrieval | Runtime web search (Steam, Epic, vendor pages) | currently a clearly-marked STUB dict in Node 2 |
+| Testing | — | **pytest** integration suite (`tests/`) |
 
 ---
 
@@ -387,6 +449,40 @@ hard_constraints:
 
 ---
 
-## Maintaining this doc
+## Appendix B — Repository Map (as built)
 
-Keep this file in the Karma ai repo (e.g. `/docs/DESIGN.md`). At the end of a design session: paste the current file in, work through decisions, ask for the updated Markdown, paste it back, and commit. Every change is then git-tracked, and any fresh session gets full context from one paste.
+```
+karma ai/
+├── run_pipeline.py                 # CLI driver; owns the conversation loop; --fixture / --fixture-all
+├── requirements.txt                # openai, langgraph, pydantic, psycopg2-binary, neo4j, ...
+├── agents/
+│   ├── llm/client.py               # call_structured / call_text / StructuredCallError (OpenAI wrapper)
+│   ├── graph.py                    # LangGraph StateGraph (karma_graph)
+│   ├── graph_runner.py             # run_from_brief(brief, price_bands) — API/fixture entry
+│   ├── state/pipeline_state.py     # PipelineState TypedDict + new_state()
+│   ├── schemas/                    # source_flag, slots (ComponentSlot — canonical), brief,
+│   │                               #   feasibility, price_bands, build_card
+│   ├── nodes/
+│   │   ├── node1_intake.py         # blank_brief, floor_met, next_question, extract_turn, ...
+│   │   ├── node2_allocation.py     # allocate_budget; _distribute / _compute_bands (largest-remainder)
+│   │   ├── node3_selector.py       # derive_fitness_thresholds, select_part, select_build, SELECTION_ORDER
+│   │   └── node3_refinement.py     # RefinementRequest, parse/apply_refinement, refinement_loop
+│   ├── feasibility/
+│   │   ├── resolver.py             # resolve_requirements + aggregate_scope (deterministic)
+│   │   └── estimate.py             # estimate_feasibility (LLM + live Postgres price anchor)
+│   ├── db/
+│   │   ├── postgres.py             # PostgresClient, get_min_catalog_price, get_parts_in_band
+│   │   ├── neo4j.py                # ping, compatibility_check, fitness_filter, get_component_fitness
+│   │   └── neo4j_schema.py         # constraints + indexes + apply_schema
+│   └── output/formatter.py         # format_build_card / price_bands / impossible / tight_warning
+├── data/
+│   ├── catalog/seed.sql            # catalog table (9 categories, INR prices, in_stock, specs JSONB)
+│   ├── fixtures/                   # budget_gamer / video_editor / ml_workstation (valid Briefs)
+│   └── graph/seed_graph.py         # seeds Neo4j from the Postgres catalog (idempotent MERGE)
+├── scripts/test_db_connection.py   # self-service Supabase connection + catalog verifier
+└── tests/                          # conftest.py + test_pipeline_integration.py (pytest)
+```
+
+**Git workflow:** feature branches `phase{N}/feature-name`, conventional commits, PRs merged to `main`. Always stage with specific paths (`git add "karma ai/agents/..."`), never `git add .` — the repo root accumulates Node/`__pycache__`/stray files that `.gitignore` now covers. Always merge with `git merge <branch> -m "..."` to avoid the editor opening.
+
+---
