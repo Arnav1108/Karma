@@ -50,7 +50,7 @@ class PostgresClient:
                 """
                 SELECT MIN(price_inr)
                 FROM catalog
-                WHERE slot = %s AND in_stock = TRUE
+                WHERE category = %s AND in_stock = TRUE
                 """,
                 (component_slot.value,),
             )
@@ -77,7 +77,7 @@ class PostgresClient:
                 """
                 SELECT *
                 FROM catalog
-                WHERE slot = %s
+                WHERE category = %s
                   AND price_inr >= %s
                   AND price_inr <= %s
                   AND in_stock = %s
