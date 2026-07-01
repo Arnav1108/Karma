@@ -111,6 +111,12 @@ def format_build_card(build_card: BuildCard, brief: UserBuildBrief) -> str:
             violated = any(c.value.lower() in n for n in part_names_lower)
             lines.append(f"    {'[!!]' if violated else '[OK]'} MUST NOT  : {c.value}")
 
+    if build_card.warnings:
+        lines.append("")
+        lines.append("  Unresolved (needs your attention):")
+        for w in build_card.warnings:
+            lines.append(f"    - {w}")
+
     lines += [
         "",
         _SEP,

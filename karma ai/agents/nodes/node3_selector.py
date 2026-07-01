@@ -19,6 +19,7 @@ Public surface:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 from pydantic import BaseModel
 
@@ -48,6 +49,9 @@ SELECTION_ORDER: list[ComponentSlot] = [
 
 _BAND_WIDEN_FACTOR = 0.20
 _MAX_SHORTLIST = 7
+# Upper bound for the full-catalog escalation query (compatibility never bypasses
+# the price band silently — it escalates the band, then surfaces a dead-end).
+_FULL_CATALOG_HIGH = 10**9
 
 
 # ── Structured LLM output models ──────────────────────────────────────────────
@@ -73,6 +77,69 @@ class SelectedPart(BaseModel):
     """LLM's final pick from the shortlisted candidates for a single slot."""
     product_id: str
     justification: str
+
+
+# ── Slot selection outcome ────────────────────────────────────────────────────
+
+@dataclass
+class SlotOutcome:
+    """Result of attempting to fill one slot.
+
+    status:
+      "ok"            → part is a valid, compatible, in-budget pick.
+      "no_stock"      → catalog has no in-stock candidate in the band (graph-off path).
+      "no_compatible" → a compatible part exists nowhere in the catalog for the
+                        locked parts (real dead-end, message set).
+      "over_budget"   → a compatible part exists but the cheapest one exceeds the
+                        remaining budget-pool / ceiling (message set).
+    """
+    part: BuildCardPart | None = None
+    status: str = "ok"
+    message: str | None = None
+
+
+def _compatible_subset(
+    neo4j: Neo4jClient,
+    candidate_dicts: list[dict],
+    locked_parts: dict[ComponentSlot, str],
+    slot: ComponentSlot,
+) -> list[dict]:
+    """Return the compatibility-passing subset of candidate_dicts, preserving order."""
+    if not candidate_dicts:
+        return []
+    ok = set(
+        neo4j.compatibility_check(
+            [c["product_id"] for c in candidate_dicts],
+            locked_parts,
+            slot,
+        )
+    )
+    return [c for c in candidate_dicts if c["product_id"] in ok]
+
+
+def _locked_desc(locked_parts: dict[ComponentSlot, str]) -> str:
+    return ", ".join(f"{s.value}={pid}" for s, pid in locked_parts.items()) or "none"
+
+
+def _no_compatible_message(
+    slot: ComponentSlot, locked_parts: dict[ComponentSlot, str]
+) -> str:
+    return (
+        f"No compatible {slot.value} exists anywhere in the catalog for your "
+        f"already-selected parts ({_locked_desc(locked_parts)}). The selected "
+        f"components share no valid socket/RAM-generation with any {slot.value} in "
+        f"stock. Consider choosing a different CPU or RAM, or relaxing that requirement."
+    )
+
+
+def _over_budget_message(
+    slot: ComponentSlot, cheapest_price: int, ceiling: int
+) -> str:
+    return (
+        f"A compatible {slot.value} exists, but the cheapest option (₹{cheapest_price:,}) "
+        f"would push the build past your ₹{ceiling:,} budget ceiling. Consider raising "
+        f"the budget or choosing cheaper GPU/CPU anchors to free up room."
+    )
 
 
 # ── Fitness threshold derivation ──────────────────────────────────────────────
@@ -133,15 +200,23 @@ def select_part(
     locked_parts: dict[ComponentSlot, str],
     fitness_thresholds: dict[ComponentSlot, float],
     neo4j_available: bool,
-) -> BuildCardPart | None:
+    remaining_budget: int | None = None,
+) -> SlotOutcome:
     """Three-step funnel: Postgres catalog → Neo4j graph filter → LLM pick.
 
-    Returns None when Postgres yields no in-stock results after band widening.
-    Caller logs a warning and continues to the next slot — never crashes.
+    Compatibility against locked_parts is a HARD filter that is never bypassed:
+    the price band and the fitness threshold relax; compatibility does not. If the
+    (widened) band yields no compatible candidate, the band is escalated across the
+    full catalog to find one. Only when the entire catalog has no compatible part is
+    a "no_compatible" dead-end returned. When remaining_budget is supplied, a
+    compatible part whose price would breach the ceiling yields an "over_budget"
+    dead-end instead of a silent over-budget lock.
+
+    Returns a SlotOutcome — inspect .part (None on any dead-end) and .status.
     """
     pg = PostgresClient()
 
-    # ── Step 1: Postgres catalog query ────────────────────────────────────────
+    # ── Step 1: Postgres catalog query (band, with one 20% widening retry) ────
     candidates = pg.get_parts_in_band(slot, band.low, band.high, in_stock=True)
     if not candidates:
         widened_low = int(band.low * (1 - _BAND_WIDEN_FACTOR))
@@ -151,61 +226,70 @@ def select_part(
             slot.value, band.low, band.high, widened_low, widened_high,
         )
         candidates = pg.get_parts_in_band(slot, widened_low, widened_high, in_stock=True)
-    if not candidates:
-        logger.warning(
-            "[Node3] %s: catalog still empty after 20%% band widening — slot skipped",
-            slot.value,
-        )
-        return None
 
-    # ── Step 2: Neo4j graph filter ────────────────────────────────────────────
-    # Skipped entirely when neo4j_available is False.
-    # compatibility_check and fitness_filter both "fail open": when the graph
-    # has no data for a candidate it is kept, never penalised. So the fallback
-    # path (graph sparse → use all candidates) is activated by an empty return
-    # that means ALL candidates were excluded — i.e. real incompatibilities were
-    # found for all of them — which in an empty graph never happens.
-    shortlist_dicts = candidates
-    if neo4j_available:
-        neo4j = Neo4jClient()
-        candidate_ids = [c["product_id"] for c in candidates]
-        by_id = {c["product_id"]: c for c in candidates}
+    # ── Step 2: Neo4j compatibility (HARD filter) + band escalation ───────────
+    # compatibility_check "fails open" only for candidates ABSENT from the graph;
+    # an in-graph candidate that shares no required spec with a locked part is a
+    # genuine conflict and is dropped. We never restore dropped candidates. When
+    # the band has zero compatible parts, we escalate the price band (not the
+    # compatibility rule) across the full catalog before declaring a dead-end.
+    compat_active = neo4j_available and bool(locked_parts)
+    neo4j = Neo4jClient() if neo4j_available else None
 
-        # compatibility_check: takes list[str] IDs + typed locked_parts + slot.
-        # Returns the compatible subset (fail-open for graph-absent candidates).
-        compatible_ids = neo4j.compatibility_check(
-            candidate_ids,
-            locked_parts,
-            slot,
-        )
-        if not compatible_ids:
+    if compat_active:
+        working = _compatible_subset(neo4j, candidates, locked_parts, slot)
+        if not working:
+            full = pg.get_parts_in_band(slot, 0, _FULL_CATALOG_HIGH, in_stock=True)
+            working = _compatible_subset(neo4j, full, locked_parts, slot)
+            if not working:
+                msg = _no_compatible_message(slot, locked_parts)
+                logger.warning("[Node3] %s: %s", slot.value, msg)
+                return SlotOutcome(status="no_compatible", message=msg)
             logger.info(
-                "[Node3] %s: all %d candidates excluded by compatibility_check "
-                "(real conflicts detected) — falling back to full Postgres list",
-                slot.value, len(candidates),
+                "[Node3] %s: no compatible part within price band — escalated to full "
+                "catalog, %d compatible candidate(s) found",
+                slot.value, len(working),
             )
-            compatible_ids = candidate_ids
+    else:
+        working = candidates
+        if not working:
+            logger.warning(
+                "[Node3] %s: catalog still empty after 20%% band widening — slot skipped",
+                slot.value,
+            )
+            return SlotOutcome(status="no_stock")
 
-        # fitness_filter: takes list[str] IDs, use_case, threshold (no slot arg).
-        # Returns weighted passes (desc) + unweighted fail-opens.
+    # ── Step 2b: budget-pool ceiling check (DESIGN §2.4 drift safeguard) ───────
+    # Distinguishes "compatible-but-unaffordable" from "no compatible part".
+    if remaining_budget is not None:
+        affordable = [c for c in working if int(c.get("price_inr", 0)) <= remaining_budget]
+        if not affordable:
+            cheapest = min(int(c.get("price_inr", 0)) for c in working)
+            msg = _over_budget_message(slot, cheapest, brief.budget.ceiling)
+            logger.warning("[Node3] %s: %s", slot.value, msg)
+            return SlotOutcome(status="over_budget", message=msg)
+        working = affordable
+
+    # ── Step 2c: fitness ordering (relaxable — fail-open, never a hard cut) ────
+    if neo4j_available:
+        by_id = {c["product_id"]: c for c in working}
         fit_ids = neo4j.fitness_filter(
-            compatible_ids,
+            list(by_id.keys()),
             brief.purpose.primary_use_case,
             fitness_thresholds[slot],
         )
         if fit_ids:
-            shortlist_dicts = [by_id[pid] for pid in fit_ids if pid in by_id]
-            if not shortlist_dicts:
-                shortlist_dicts = [by_id[pid] for pid in compatible_ids if pid in by_id]
+            reordered = [by_id[pid] for pid in fit_ids if pid in by_id]
+            if reordered:
+                working = reordered
         else:
             logger.info(
-                "[Node3] %s: fitness_filter returned empty (threshold %.2f) — "
-                "falling back to %d compatible parts",
-                slot.value, fitness_thresholds[slot], len(compatible_ids),
+                "[Node3] %s: fitness_filter returned empty (threshold %.2f) — keeping "
+                "%d compatible part(s) unranked",
+                slot.value, fitness_thresholds[slot], len(working),
             )
-            shortlist_dicts = [by_id[pid] for pid in compatible_ids if pid in by_id]
 
-    shortlist_dicts = shortlist_dicts[:_MAX_SHORTLIST]
+    shortlist_dicts = working[:_MAX_SHORTLIST]
 
     # ── Step 3: LLM final pick ────────────────────────────────────────────────
     parts_text = "\n".join(
@@ -251,12 +335,15 @@ def select_part(
         )
         matched = shortlist_dicts[0]
 
-    return BuildCardPart(
-        slot=slot,
-        product_id=matched["product_id"],
-        name=matched.get("name", matched["product_id"]),
-        price_inr=int(matched.get("price_inr", 0)),
-        justification=picked.justification,
+    return SlotOutcome(
+        part=BuildCardPart(
+            slot=slot,
+            product_id=matched["product_id"],
+            name=matched.get("name", matched["product_id"]),
+            price_inr=int(matched.get("price_inr", 0)),
+            justification=picked.justification,
+        ),
+        status="ok",
     )
 
 
@@ -266,11 +353,14 @@ def select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
     """Walk SELECTION_ORDER and fill each slot via the three-step funnel.
 
     Safeguards applied during the walk:
-      • Running budget tracker logged after every lock.
+      • Running budget-pool tracker: each slot is solved against the remaining
+        headroom to the ceiling; a compatible-but-unaffordable slot dead-ends.
       • Lookahead probe after GPU + CPU lock: warns if no compatible
         motherboard exists in the current band before continuing.
-      • Post-lock compatibility validator: logs any conflict returned by
-        Neo4j after each new part is added to locked_parts.
+      • Post-lock compatibility validator: refuses to lock (does not merely log)
+        any part Neo4j flags as conflicting with an already-locked part.
+      • Dead-end surfacing: no_compatible / over_budget outcomes are collected as
+        plain-English warnings on the returned BuildCard.
     """
     # ── Upfront checks ────────────────────────────────────────────────────────
     neo4j_available: bool = Neo4jClient().ping()
@@ -288,6 +378,7 @@ def select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
 
     locked_parts: dict[ComponentSlot, str] = {}  # slot → product_id
     selected_parts: list[BuildCardPart] = []
+    warnings: list[str] = []
     running_spend = 0
 
     for slot in SELECTION_ORDER:
@@ -326,21 +417,33 @@ def select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
                 )
 
         # ── Three-step funnel ─────────────────────────────────────────────────
-        part = select_part(
+        remaining_budget = brief.budget.ceiling - running_spend
+        outcome = select_part(
             slot=slot,
             band=band,
             brief=brief,
             locked_parts=locked_parts,
             fitness_thresholds=fitness_thresholds,
             neo4j_available=neo4j_available,
+            remaining_budget=remaining_budget,
         )
-        if part is None:
-            logger.warning("[Node3] %s: slot left empty in build", slot.value)
+        if outcome.part is None:
+            # no_compatible / over_budget carry a plain-English message to surface;
+            # no_stock (or any messageless status) just leaves the slot empty.
+            if outcome.message:
+                logger.warning("[Node3] %s dead-end: %s", slot.value, outcome.message)
+                warnings.append(outcome.message)
+            else:
+                logger.warning("[Node3] %s: slot left empty in build", slot.value)
             continue
 
-        # ── Post-lock compatibility validator ─────────────────────────────────
-        # compatibility_check fails open when graph is unpopulated, so an empty
-        # return specifically means real constraint violations were detected.
+        part = outcome.part
+
+        # ── Post-lock compatibility validator (blocks, does not merely log) ────
+        # select_part already applies compatibility as a hard filter, so this is
+        # defense in depth. compatibility_check fails open for graph-absent parts,
+        # so an empty return here means a real, in-graph constraint violation — in
+        # which case we REFUSE to lock rather than ship a known-bad build.
         if neo4j_available and locked_parts:
             check = Neo4jClient().compatibility_check(
                 [part.product_id],
@@ -348,11 +451,14 @@ def select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
                 slot,
             )
             if not check:
-                logger.warning(
-                    "[Node3] %s: compatibility conflict detected — %s may not be "
-                    "compatible with one or more locked parts %s",
-                    slot.value, part.product_id, list(locked_parts.keys()),
+                msg = (
+                    f"Blocked an incompatible {slot.value} ({part.product_id}) that "
+                    f"conflicts with locked parts {[s.value for s in locked_parts]}; "
+                    f"slot left unfilled to avoid a known-bad build."
                 )
+                logger.error("[Node3] %s: %s", slot.value, msg)
+                warnings.append(msg)
+                continue
 
         locked_parts[slot] = part.product_id
         selected_parts.append(part)
@@ -373,4 +479,9 @@ def select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
         f"{len(selected_parts)}/{len(SELECTION_ORDER)} slots filled — "
         f"total ₹{total:,}"
     )
-    return BuildCard(parts=selected_parts, total_price_inr=total, summary=summary)
+    return BuildCard(
+        parts=selected_parts,
+        total_price_inr=total,
+        summary=summary,
+        warnings=warnings,
+    )
