@@ -161,6 +161,19 @@ def _seed_compatibility(session, product_id: str, slot: ComponentSlot, specs: di
                 gen_value=gen_value,
             )
 
+        # form_factor is a single string ("ATX", "mATX", "ITX") in catalog specs
+        form_factor = specs.get("form_factor")
+        if form_factor:
+            session.run(
+                """
+                MATCH (c:Component {product_id: $product_id})
+                MERGE (s:Spec {type: 'form_factor', value: $ff})
+                MERGE (c)-[:REQUIRES_FORM_FACTOR {ff: $ff}]->(s)
+                """,
+                product_id=product_id,
+                ff=form_factor,
+            )
+
     elif slot == ComponentSlot.ram:
         # RAM connects to the same :Spec{type:'ddr_gen'} nodes as motherboards,
         # enabling compatibility traversal between the two.
