@@ -81,17 +81,23 @@ def _select_build_with_pins(
             result_parts.append(part)
             locked_parts[slot] = part.product_id
         else:
-            part = select_part(
+            remaining_budget = brief.budget.ceiling - sum(p.price_inr for p in result_parts)
+            outcome = select_part(
                 slot,
                 price_bands[slot],
                 brief,
                 locked_parts,
                 fitness_thresholds,
                 neo4j_available,
+                remaining_budget=remaining_budget,
             )
-            if part is not None:
-                result_parts.append(part)
-                locked_parts[slot] = part.product_id
+            if outcome.part is not None:
+                result_parts.append(outcome.part)
+                locked_parts[slot] = outcome.part.product_id
+            elif outcome.message:
+                logger.warning(
+                    "Slot %s dead-ended during refinement: %s", slot, outcome.message
+                )
             else:
                 logger.warning("No part found for slot %s during refinement", slot)
 
