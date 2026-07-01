@@ -28,8 +28,8 @@ OPTIONAL MATCH (c:Component {product_id: $candidate_id})
 WITH c, c IS NOT NULL AS candidate_exists
 OPTIONAL MATCH (locked_node:Component {product_id: $locked_id})
 WITH c, candidate_exists, locked_node, locked_node IS NOT NULL AS locked_exists
-OPTIONAL MATCH (c)-[:REQUIRES_DDR]->(spec:Spec {type: "ddr_gen"})
-              <-[:REQUIRES_DDR]-(locked_node)
+OPTIONAL MATCH (c)-[:SUPPORTS_DDR]->(spec:Spec {type: "ddr_gen"})
+              <-[:SUPPORTS_DDR]-(locked_node)
 WITH candidate_exists, locked_exists, count(spec) AS shared_specs
 RETURN candidate_exists, locked_exists, shared_specs > 0 AS compatible
 """
