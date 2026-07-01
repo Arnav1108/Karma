@@ -28,6 +28,7 @@ from ..db.postgres import PostgresClient
 from ..llm.client import call_structured
 from ..schemas.brief import UserBuildBrief
 from ..schemas.build_card import BuildCard, BuildCardPart
+from ..schemas.feasibility import FeasibilityVerdict
 from ..schemas.price_bands import PriceBand, PriceBands
 from ..schemas.slots import ComponentSlot
 
@@ -96,6 +97,21 @@ class SlotOutcome:
     part: BuildCardPart | None = None
     status: str = "ok"
     message: str | None = None
+
+
+def _get_ddr_gen(candidate: dict) -> int | None:
+    specs = candidate.get("specs")
+    if isinstance(specs, dict):
+        return specs.get("ddr_gen")
+    return None
+
+
+def _ddr4_first(candidates: list[dict]) -> list[dict]:
+    """Stable reorder: DDR4 parts first, then everything else.  Order within
+    each group is preserved so price/fitness ranking is not otherwise disturbed."""
+    ddr4 = [c for c in candidates if _get_ddr_gen(c) == 4]
+    rest = [c for c in candidates if _get_ddr_gen(c) != 4]
+    return ddr4 + rest
 
 
 def _compatible_subset(
@@ -201,6 +217,7 @@ def select_part(
     fitness_thresholds: dict[ComponentSlot, float],
     neo4j_available: bool,
     remaining_budget: int | None = None,
+    ddr4_bias: bool = False,
 ) -> SlotOutcome:
     """Three-step funnel: Postgres catalog → Neo4j graph filter → LLM pick.
 
@@ -226,6 +243,40 @@ def select_part(
             slot.value, band.low, band.high, widened_low, widened_high,
         )
         candidates = pg.get_parts_in_band(slot, widened_low, widened_high, in_stock=True)
+
+    # ── Step 1b: DDR4 preference bias (tight budget only) ───────────────────
+    # On a tight budget the RAM slot is selected before Motherboard, so an
+    # unbiased DDR5 pick can strand the board slot (DDR5 LGA1700 boards cost
+    # significantly more than DDR4 equivalents). Two-step logic:
+    #   1. If no DDR4 exists in the current band, augment candidates with DDR4
+    #      parts from [0, widened_high] — saving on RAM frees budget for the board.
+    #   2. Stable DDR4-first reorder so the LLM shortlist sees DDR4 options first.
+    # Graceful degradation: if the catalog has no DDR4 at all, the DDR5 list is
+    # passed through unchanged — never a dead-end.
+    if ddr4_bias:
+        ddr4_in_band = [c for c in candidates if _get_ddr_gen(c) == 4]
+        if not ddr4_in_band:
+            # Band floor excludes cheaper DDR4 — pull from the full affordable range.
+            ddr4_ceiling = int(band.high * (1 + _BAND_WIDEN_FACTOR))
+            extra_ddr4 = [
+                c for c in pg.get_parts_in_band(slot, 0, ddr4_ceiling, in_stock=True)
+                if _get_ddr_gen(c) == 4
+            ]
+            if extra_ddr4:
+                extra_ids = {c["product_id"] for c in extra_ddr4}
+                candidates = extra_ddr4 + [c for c in candidates if c["product_id"] not in extra_ids]
+                logger.info(
+                    "[Node3] %s: tight-budget DDR4 pull — no DDR4 in band; "
+                    "added %d DDR4 part(s) from below floor",
+                    slot.value, len(extra_ddr4),
+                )
+        if candidates:
+            ddr4_count = sum(1 for c in candidates if _get_ddr_gen(c) == 4)
+            candidates = _ddr4_first(candidates)
+            logger.info(
+                "[Node3] %s: tight-budget DDR4 bias — %d DDR4 / %d total candidates",
+                slot.value, ddr4_count, len(candidates),
+            )
 
     # ── Step 2: Neo4j compatibility (HARD filter) + band escalation ───────────
     # compatibility_check "fails open" only for candidates ABSENT from the graph;
@@ -349,7 +400,11 @@ def select_part(
 
 # ── Main orchestrator ─────────────────────────────────────────────────────────
 
-def select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
+def select_build(
+    brief: UserBuildBrief,
+    price_bands: PriceBands,
+    feasibility_verdict: FeasibilityVerdict | None = None,
+) -> BuildCard:
     """Walk SELECTION_ORDER and fill each slot via the three-step funnel.
 
     Safeguards applied during the walk:
@@ -366,6 +421,13 @@ def select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
     neo4j_available: bool = Neo4jClient().ping()
     if not neo4j_available:
         logger.info("[Node3] Neo4j unreachable — graph filter disabled for all slots")
+
+    tight_budget = (
+        feasibility_verdict is not None
+        and feasibility_verdict.verdict == "tight"
+    )
+    if tight_budget:
+        logger.info("[Node3] tight budget detected — DDR4 preference bias enabled for RAM")
 
     fitness_thresholds = derive_fitness_thresholds(brief)
     logger.info(
@@ -426,6 +488,7 @@ def select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
             fitness_thresholds=fitness_thresholds,
             neo4j_available=neo4j_available,
             remaining_budget=remaining_budget,
+            ddr4_bias=(tight_budget and slot == ComponentSlot.ram),
         )
         if outcome.part is None:
             # no_compatible / over_budget carry a plain-English message to surface;

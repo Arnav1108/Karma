@@ -157,7 +157,8 @@ def node_select(state: PipelineState) -> PipelineState:
 
     brief = state.get("current_brief")
     bands = state.get("price_bands")
-    build_card = select_build(brief, bands)
+    verdict = state.get("feasibility_verdict")
+    build_card = select_build(brief, bands, feasibility_verdict=verdict)
 
     return {  # type: ignore[return-value]
         "build_card": build_card,
