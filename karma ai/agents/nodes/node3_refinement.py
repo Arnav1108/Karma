@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from ..db.neo4j import Neo4jClient
 from ..llm.client import call_structured
 from ..nodes.node2_allocation import allocate_budget
+from ..feasibility.resolver import resolve_requirements
 from ..nodes.node3_selector import (
     SELECTION_ORDER,
     derive_fitness_thresholds,
@@ -72,6 +73,7 @@ def _select_build_with_pins(
 ) -> BuildCard:
     fitness_thresholds = derive_fitness_thresholds(brief)
     neo4j_available = Neo4jClient().ping()
+    req = resolve_requirements(brief)
     locked_parts: dict[ComponentSlot, str] = {}
     result_parts: list[BuildCardPart] = []
 
@@ -89,6 +91,7 @@ def _select_build_with_pins(
                 locked_parts,
                 fitness_thresholds,
                 neo4j_available,
+                req=req,
                 remaining_budget=remaining_budget,
             )
             if outcome.part is not None:

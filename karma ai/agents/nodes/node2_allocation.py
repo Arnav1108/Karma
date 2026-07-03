@@ -11,13 +11,19 @@ Public surface:
 
 from __future__ import annotations
 
+import logging
 import math
 from pydantic import RootModel
 
+from .. import costs as _costs
+from ..feasibility.catalog_floor import compute_catalog_floor
+from ..feasibility.resolver import resolve_requirements
 from ..llm.client import call_structured
 from ..schemas.brief import UserBuildBrief
 from ..schemas.price_bands import PriceBand, PriceBands
 from ..schemas.slots import ComponentSlot
+
+logger = logging.getLogger(__name__)
 
 
 # ── Internal LLM response type ────────────────────────────────────────────────
@@ -100,27 +106,9 @@ _ALLOCATION_PROFILES: dict[str, dict[ComponentSlot, int]] = {
     },
 }
 
-# ── Stub fixed-cost tables ────────────────────────────────────────────────────
-# STUB: Replace with real market prices once catalog is seeded.
-
-_OS_COST: dict[str, int] = {
-    "oem": 1500,
-    "retail": 13000,
-    "byo": 0,
-    "na": 0,
-}
-
-# Used when monitor is in scope (pc_plus_monitor / full_setup) and not owned.
-# Keyed by resolution string from brief.monitor.target_specs.resolution.
-# STUB: Replace with real market data.
-_MONITOR_COST_BY_RESOLUTION: dict[str, int] = {
-    "1080p": 10000,
-    "1440p": 30000,
-    "2560x1440": 30000,
-    "4K": 55000,
-    "3840x2160": 55000,
-    "default": 20000,
-}
+# ── Fixed costs ───────────────────────────────────────────────────────────────
+# Tables live in agents/costs.py, SHARED with the Feasibility Check so the core
+# pool Node 2 allocates and the pool the verdict is judged against are the same.
 
 # ── Software minimum spec stubs ───────────────────────────────────────────────
 # STUB: At runtime, these should be fetched via web-search from authoritative
@@ -188,6 +176,82 @@ def _compute_bands(
     return PriceBands(root=bands)
 
 
+# ── Catalog-grounding band repair ─────────────────────────────────────────────
+
+def _ceil500(x: int) -> int:
+    return -(-x // 500) * 500
+
+
+def _repair_bands_to_catalog(
+    bands: PriceBands,
+    floor_prices: dict[ComponentSlot, int],
+) -> PriceBands | None:
+    """Adjust bands so every slot's [low, high] contains its min-viable-build part.
+
+    floor_prices is the per-slot price of the cheapest COMPLETE compatible build
+    that fits the core ceiling (from catalog_floor). Percent-based bands routinely
+    miss the catalog's price cliffs (cheapest in-stock GPU ₹27.5k, the only ≥48GB
+    RAM kit ₹22k, cheapest DDR5 LGA1700 board ₹15k — measured by
+    scripts/calibration_sweep.py); this pass pins them back to real stock.
+
+    Invariants preserved: sum(mid) == target, sum(high) == ceiling,
+    low <= mid <= high. Deliberately relaxed: sum(low) may drop below the floor
+    budget — band.low is a catalog query bound, and keeping it high excludes
+    cheaper viable stock (e.g. DDR4 kits below an ≥₹80k gaming build's RAM low).
+
+    Returns None when the highs cannot cover the floor prices within the ceiling
+    (the verdict for such a brief is impossible; bands are left as computed).
+    """
+    high = {s: b.high for s, b in bands.root.items()}
+    mid = {s: b.mid for s, b in bands.root.items()}
+    low = {s: b.low for s, b in bands.root.items()}
+    slots = [s for s in high if s in floor_prices]
+    f500 = {s: _ceil500(floor_prices[s]) for s in slots}
+
+    # 1 — raise deficient highs to the floor price, funded from surplus highs.
+    deficit = {s: f500[s] - high[s] for s in slots if f500[s] > high[s]}
+    if deficit:
+        need = sum(deficit.values())
+        avail = {s: high[s] - f500[s] for s in slots if high[s] > f500[s]}
+        if sum(avail.values()) < need:
+            return None
+        for s in deficit:
+            high[s] = f500[s]
+        remaining = need
+        while remaining > 0:
+            donor = max(avail, key=lambda s: avail[s])
+            take = min(500, remaining, avail[donor])
+            high[donor] -= take
+            avail[donor] -= take
+            remaining -= take
+
+    # 2 — clamp mids to the new highs; redistribute the clamped excess so
+    #     sum(mid) == target still holds exactly.
+    excess = 0
+    for s in high:
+        if mid[s] > high[s]:
+            excess += mid[s] - high[s]
+            mid[s] = high[s]
+    while excess > 0:
+        headroom = {s: high[s] - mid[s] for s in high if high[s] > mid[s]}
+        if not headroom:  # sum(mid) <= sum(high) by construction; defensive only
+            break
+        s = max(headroom, key=lambda k: headroom[k])
+        add = min(500, excess, headroom[s])
+        mid[s] += add
+        excess -= add
+
+    # 3 — lows must not exclude the floor part (or invert the band ordering).
+    for s in slots:
+        low[s] = min(low[s], floor_prices[s])
+    for s in high:
+        low[s] = min(low[s], mid[s])
+
+    return PriceBands(root={
+        s: PriceBand(low=low[s], mid=mid[s], high=high[s]) for s in high
+    })
+
+
 # ── Deterministic pre-steps ───────────────────────────────────────────────────
 
 def _build_shopping_list(brief: UserBuildBrief) -> list[ComponentSlot]:
@@ -200,37 +264,14 @@ def _build_shopping_list(brief: UserBuildBrief) -> list[ComponentSlot]:
     return [s for s in ComponentSlot if s not in reused]
 
 
-def _estimate_monitor_cost(brief: UserBuildBrief) -> int:
-    """Return estimated monitor cost to subtract from core pool, or 0.
-
-    Only applies when the budget scope includes a monitor AND the user does not
-    already own one. Uses target_specs.resolution for a rough stub estimate.
-    """
-    scope = brief.budget.scope
-    if scope not in ("pc_plus_monitor", "full_setup"):
-        return 0
-    if brief.monitor.owned == "yes":
-        return 0
-
-    resolution = "default"
-    if brief.monitor.target_specs and brief.monitor.target_specs.resolution:
-        resolution = brief.monitor.target_specs.resolution.lower()
-
-    for key in _MONITOR_COST_BY_RESOLUTION:
-        if key.lower() in resolution or resolution in key.lower():
-            return _MONITOR_COST_BY_RESOLUTION[key]
-    return _MONITOR_COST_BY_RESOLUTION["default"]
-
-
 def _compute_fixed_costs(brief: UserBuildBrief) -> int:
     """Subtract OS license and monitor from total budget to get core component pool.
 
+    Delegates to agents/costs.py — the same tables the Feasibility Check uses.
     Peripheral must-haves are NOT subtracted here — pricing them requires the
     catalog (Node 3's responsibility).
     """
-    os_cost = _OS_COST.get(brief.operating_system.license, 0)
-    monitor_cost = _estimate_monitor_cost(brief)
-    return os_cost + monitor_cost
+    return _costs.core_fixed_costs(brief)
 
 
 def _get_profile(brief: UserBuildBrief) -> dict[ComponentSlot, int]:
@@ -260,8 +301,11 @@ def allocate_budget(brief: UserBuildBrief) -> PriceBands:
     LLM step:
       3. Ask for proportional weights only (no INR values).
 
-    Post-step (deterministic):
+    Post-steps (deterministic):
       4. _compute_bands() → PriceBands with exact sum constraints.
+      5. _repair_bands_to_catalog() → pin every band to real catalog stock via
+         the min-viable-build floor (shared with the Feasibility Check). Skipped
+         gracefully when the catalog is unreachable or nothing fits the ceiling.
     """
     # Step 1 — shopping list
     shopping_list = _build_shopping_list(brief)
@@ -334,4 +378,38 @@ Values must be positive floats representing relative weight. They need not sum t
             skew[s] = float(default_profile.get(s, 1))
 
     # Step 4 — compute exact price bands deterministically
-    return _compute_bands(skew, floor, target, ceiling)
+    bands = _compute_bands(skew, floor, target, ceiling)
+
+    # Step 5 — pin bands to real catalog stock (shared floor with feasibility)
+    catalog_floor = compute_catalog_floor(brief)
+    if catalog_floor is None:
+        logger.warning(
+            "[Node2] catalog unreachable — bands NOT repaired against real stock"
+        )
+        return bands
+
+    viable = catalog_floor.best_within(ceiling)
+    if viable is None:
+        logger.warning(
+            "[Node2] no complete compatible build fits the core ceiling ₹%d — "
+            "bands left as allocated (feasibility verdict should be 'impossible')",
+            ceiling,
+        )
+        return bands
+
+    floor_prices = {s: p["price_inr"] for s, p in viable.items() if s in shopping_list}
+    repaired = _repair_bands_to_catalog(bands, floor_prices)
+    if repaired is None:
+        logger.warning(
+            "[Node2] band repair infeasible within ceiling ₹%d — bands left as allocated",
+            ceiling,
+        )
+        return bands
+
+    changed = [
+        s.value for s in bands.root
+        if bands.root[s] != repaired.root[s]
+    ]
+    if changed:
+        logger.info("[Node2] bands repaired to catalog floor: %s", ", ".join(changed))
+    return repaired

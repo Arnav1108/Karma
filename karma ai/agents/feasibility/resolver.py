@@ -22,6 +22,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from .. import costs as _costs
 from ..schemas.brief import UserBuildBrief
 from ..schemas.slots import ComponentSlot
 
@@ -345,29 +346,10 @@ def resolve_requirements(brief: UserBuildBrief) -> ResolvedRequirements:
 # ---------------------------------------------------------------------------
 # Step 2 - Scope Aggregator
 # ---------------------------------------------------------------------------
-# !!! STUB COSTS !!! Rough placeholder INR values, NOT real pricing. Replace with
-# live catalog data later (DESIGN.md 2.2 notes non-component costs are rough).
+# Cost tables live in agents/costs.py — the SAME tables Node 2 subtracts as
+# fixed costs. Two independent stub tables here previously disagreed with Node 2
+# by ₹19,500 on video_editor's core pool (monitor 18k vs 30k, OEM OS 9k vs 1.5k).
 
-_STUB_COSTS_INR = {
-    "monitor": 18000,
-    "os_license": 9000,          # Windows retail/OEM ballpark
-}
-
-# STUB: rough must-have peripheral costs (INR) by SoftwareEntry-independent type.
-_STUB_PERIPHERAL_COST_INR = {
-    "keyboard": 3000, "mouse": 2000, "headset": 4000, "mic": 5000,
-    "speakers": 4000, "drawing_tablet": 12000, "controller": 4500, "webcam": 3500,
-}
-
-# STUB: assumed resale/own value of a reused part by slot (subtracted as a saving).
-_STUB_REUSED_PART_VALUE_INR = {
-    ComponentSlot.gpu: 25000, ComponentSlot.cpu: 15000, ComponentSlot.ram: 5000,
-    ComponentSlot.storage: 8000, ComponentSlot.motherboard: 10000,
-    ComponentSlot.psu: 6000, ComponentSlot.case: 5000, ComponentSlot.cooler: 3000,
-    ComponentSlot.fans: 1500,
-}
-
-_MONITOR_SCOPES = {"pc_plus_monitor", "full_setup"}
 _PERIPHERAL_SCOPES = {"pc_plus_peripherals", "full_setup"}
 
 
@@ -379,16 +361,18 @@ def aggregate_scope(brief: UserBuildBrief) -> ScopeAdjustments:
     scope = brief.budget.scope
     items: list[ScopeLineItem] = []
 
-    # Monitor: only if unowned AND in scope.
-    if brief.monitor.owned == "no" and scope in _MONITOR_SCOPES:
+    # Monitor: only if unowned AND in scope (resolution-aware, shared with Node 2).
+    monitor_inr = _costs.monitor_cost(brief)
+    if monitor_inr > 0:
         items.append(ScopeLineItem(
-            label="monitor", amount_inr=_STUB_COSTS_INR["monitor"], kind="add",
+            label="monitor", amount_inr=monitor_inr, kind="add",
         ))
 
-    # OS license: charge unless brought-yourself / not-applicable.
-    if brief.operating_system.license not in ("byo", "na"):
+    # OS license: charge by license type (shared table with Node 2).
+    os_inr = _costs.os_cost(brief)
+    if os_inr > 0:
         items.append(ScopeLineItem(
-            label="os_license", amount_inr=_STUB_COSTS_INR["os_license"], kind="add",
+            label="os_license", amount_inr=os_inr, kind="add",
         ))
 
     # Must-have peripherals: only when peripherals are in scope.
@@ -398,7 +382,7 @@ def aggregate_scope(brief: UserBuildBrief) -> ScopeAdjustments:
                 continue
             items.append(ScopeLineItem(
                 label=f"peripheral:{p.type}",
-                amount_inr=_STUB_PERIPHERAL_COST_INR.get(p.type, 0),
+                amount_inr=_costs.peripheral_cost(p.type),
                 kind="add",
             ))
 
@@ -409,7 +393,7 @@ def aggregate_scope(brief: UserBuildBrief) -> ScopeAdjustments:
         items.append(ScopeLineItem(
             label=f"reused:{part.identifier}",
             slot=part.slot,
-            amount_inr=_STUB_REUSED_PART_VALUE_INR.get(part.slot, 0),
+            amount_inr=_costs.reused_part_value(part.slot),
             kind="subtract",
         ))
 
