@@ -4,7 +4,7 @@
 > **Status legend:** 🔒 Locked · 🛠️ Implemented · 🚧 In design · ❓ Open
 > _Last updated: 2026-06-30_
 >
-> **Implementation status:** Phases 0–2 code-complete and merged to `main`. The full pipeline (Node 1 → Feasibility → Node 2 → Node 3 + refinement) is built, wired into a LangGraph `StateGraph`, and exercised by an integration test suite. The system is **blocked on one environment item only** — the Supabase `POSTGRES_URL` points at the retired direct host and must be updated to the Session Pooler URL before the pipeline returns real (non-empty) results. See §10.
+> **Implementation status:** Phases 0–2 code-complete and merged to `main`. The full pipeline (Node 1 → Feasibility → Node 2 → Node 3 + refinement) is built, wired into a LangGraph `StateGraph`, and exercised by an integration test suite. Postgres (Session Pooler) and Neo4j (Enterprise edition, local Docker, seeded) are both live; all three compatibility families are enforced as hard filters. Remaining pre-production blocker: Neo4j needs migration off local Docker to a backend-reachable hosted instance. See §3, §9, §10.
 
 ---
 
@@ -143,11 +143,13 @@ flowchart LR
 - **Single database:** Neo4j handles both compatibility and fitness traversal. A Postgres/relational approach for compatibility was evaluated and rejected — the agentic system benefits from traversing both in the same semantic space without context switching. Compatibility edges are weightless but still traversed as graph relationships.
 
 **As built:**
-- `agents/db/neo4j_schema.py` — label constants (`COMPONENT`, `SPEC`, `USE_CASE`, `PERFORMANCE`, `COMPONENT_CLASS`), node-key constraints, indexes, and an idempotent `apply_schema(driver)`.
-- `data/graph/seed_graph.py` — populates the graph from the Postgres catalog using `MERGE` throughout (idempotent). Creates `:Component` nodes; `[:BELONGS_TO]` → `:ComponentClass`; compatibility junctions (`:Spec` nodes for socket / DDR-gen / form-factor, with cooler `socket_compat`, motherboard `ddr_support`, case `form_factor` read from the catalog `specs` JSONB); weighted `[:GOOD_FOR {weight}]` → `:UseCase` edges; and `[:HAS_VRAM {gb}]` → `:Performance` for GPUs.
+- `agents/db/neo4j_schema.py` — label constants (`COMPONENT`, `SPEC`, `USE_CASE`, `PERFORMANCE`, `COMPONENT_CLASS`), node-key constraints, indexes, and an idempotent `apply_schema(driver)`. Requires the **Enterprise** image (`neo4j:5-enterprise`, `NEO4J_ACCEPT_LICENSE_AGREEMENT=yes`) — Community fails silently on the first `NODE_KEY` constraint.
+- `data/graph/seed_graph.py` — populates the graph from the Postgres catalog using `MERGE` throughout (idempotent). Creates `:Component` nodes; `[:BELONGS_TO]` → `:ComponentClass`; compatibility junctions (`:Spec` nodes for socket / DDR-gen / form-factor, with cooler `socket_compat`, motherboard `ddr_support`, case + motherboard `form_factor`, all read from the catalog `specs` JSONB); weighted `[:GOOD_FOR {weight}]` → `:UseCase` edges; and `[:HAS_VRAM {gb}]` → `:Performance` for GPUs.
 - `agents/db/neo4j.py` — real parametrized Cypher (no f-strings): `compatibility_check(candidate_ids, locked_parts, candidate_slot)`, `fitness_filter(candidate_ids, use_case, threshold)` (fail-open — components with no `:GOOD_FOR` edge are kept, not dropped), `get_component_fitness(product_id, use_case)`, and `ping()` for availability detection.
 
-**Still open:** the `[:GOOD_FOR]` weights are a clearly-marked **STUB** table in `seed_graph.py` (sensible defaults, e.g. GPU→gaming 0.9, CPU→work 0.9); real benchmark-sourced weights and the precise weight rubric are deferred. A live Neo4j instance has **not** been stood up or seeded yet — Node 3 detects this via `ping()` and degrades to Postgres-only selection.
+**Live and enforced:** a Neo4j instance (Enterprise edition, local Docker) is stood up and seeded (103 products, 9 `ComponentClass`, 9 `Spec`, 5 `UseCase`, 4 `Performance` nodes + relationships); Node 3 detects it via `ping()`. All **three compatibility families — socket (CPU↔motherboard, cooler↔CPU), DDR generation (motherboard↔RAM), form factor (case↔motherboard)** — are hard-filtered: never bypassed by the price-band relaxation ladder, verified bidirectionally end-to-end. Node 3 additionally hard-filters the *resolved requirement floor* (VRAM / CPU tier / RAM & storage capacity / storage type) at the same catalog-query layer — see `agents/feasibility/catalog_floor.py`.
+
+**Still open:** the `[:GOOD_FOR]` weights are a clearly-marked **STUB** table in `seed_graph.py` (sensible defaults, e.g. GPU→gaming 0.9, CPU→work 0.9) — real benchmark-sourced weights and the precise weight rubric remain deferred; this is unrelated to the compatibility enforcement above. Neo4j runs local Docker only — not yet migrated to a hosted instance reachable by a deployed backend (see §9).
 
 ---
 
@@ -288,8 +290,8 @@ Rule of thumb: tasks requiring **reasoning about tradeoffs across multiple dimen
 **Completed since last revision** (moved out of this list): Neo4j schema + seed script, Cypher query patterns, Node 3 selection funnel, Node 3 refinement loop, LangGraph wiring, output formatter, integration test suite.
 
 **Immediate (environment, not code):**
-- **Supabase connection (BLOCKER):** `POSTGRES_URL` points at the retired direct host (`db.<ref>.supabase.co`). Update to the Session Pooler URL (Dashboard → Connect → Session pooler; username becomes `postgres.<ref>`). Verify with `python -m scripts.test_db_connection`. Until fixed, feasibility verdicts are pessimistic and Node 3 returns empty build cards.
-- **Stand up + seed Neo4j:** no live instance yet. Once running, `python -m data.graph.seed_graph` populates it; Node 3 auto-upgrades from Postgres-only to full graph filtering.
+- ~~**Supabase connection**~~ ✅ RESOLVED — `POSTGRES_URL` uses the Session Pooler URL; verified live via `python -m scripts.test_db_connection`.
+- ~~**Stand up + seed Neo4j**~~ ✅ RESOLVED — Enterprise edition, local Docker, seeded; all three compatibility families enforced (§3). Remaining: migrate off local Docker to a backend-reachable hosted instance (e.g. Aura) — infra is not yet reachable by a deployed backend.
 
 **Small wiring remaining:**
 - Swap `run_pipeline.py`'s inline price-band printer for `agents.output.formatter.format_price_bands`.

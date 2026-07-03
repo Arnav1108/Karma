@@ -91,9 +91,11 @@
    replacing it with real data is higher-stakes than before.
 2. **Aura migration** — infra is local Docker only, not reachable by deployed
    backend; required pre-production (env swap only, seed is idempotent)
-3. **Housekeeping** — CLAUDE.md + docs/ not committed; calibration + floor-
-   enforcement work uncommitted on phase3/form-factor-and-ram-ddr4-bias:
-   agents/costs.py, catalog_floor.py, estimate.py, node2, node3 (floor filter +
-   DDR4 gate), node3_refinement, scripts/calibration_sweep.py, and 4 edge
-   fixtures (edge_intel_gamer, edge_tight_amd, edge_floor_violating_cheapest,
-   edge_floor_at_band_low)
+
+**Housekeeping — DONE (2026-07-03).** CLAUDE.md, karma ai/DESIGN.md, docs/
+synced against the calibration + floor-enforcement commits and merged to main:
+`6ea3920` (feat(feasibility): catalog-grounded verdict + shared cost/floor
+primitive) and `3e37315` (feat(node3): enforce resolved requirement floors as
+a hard query filter). CLAUDE.md's Neo4j status / file tree / data contracts
+and DESIGN.md's §3 compatibility-family status + §9 stale blockers now match
+shipped state. docs/plan.md reset (cycle closed, no accumulated history).
