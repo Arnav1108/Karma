@@ -25,6 +25,8 @@ from pydantic import BaseModel
 
 from ..db.neo4j import Neo4jClient
 from ..db.postgres import PostgresClient
+from ..feasibility.catalog_floor import slot_requirement_filter
+from ..feasibility.resolver import ResolvedRequirements, resolve_requirements
 from ..llm.client import call_structured
 from ..schemas.brief import UserBuildBrief
 from ..schemas.build_card import BuildCard, BuildCardPart
@@ -87,11 +89,13 @@ class SlotOutcome:
     """Result of attempting to fill one slot.
 
     status:
-      "ok"            → part is a valid, compatible, in-budget pick.
+      "ok"            → part is a valid, floor-meeting, compatible, in-budget pick.
+      "no_floor"      → no in-stock part meets the resolved requirement floor at
+                        any price (real dead-end, message set).
       "no_stock"      → catalog has no in-stock candidate in the band (graph-off path).
-      "no_compatible" → a compatible part exists nowhere in the catalog for the
-                        locked parts (real dead-end, message set).
-      "over_budget"   → a compatible part exists but the cheapest one exceeds the
+      "no_compatible" → a floor-meeting part exists but none is compatible with
+                        the locked parts (real dead-end, message set).
+      "over_budget"   → a valid part exists but the cheapest one exceeds the
                         remaining budget-pool / ceiling (message set).
     """
     part: BuildCardPart | None = None
@@ -104,6 +108,98 @@ def _get_ddr_gen(candidate: dict) -> int | None:
     if isinstance(specs, dict):
         return specs.get("ddr_gen")
     return None
+
+
+def _floor_filter(
+    slot: ComponentSlot,
+    parts: list[dict],
+    req: ResolvedRequirements,
+    brief: UserBuildBrief,
+) -> list[dict]:
+    """Drop parts that violate the slot's resolved requirement floor.
+
+    Reuses catalog_floor.slot_requirement_filter — the SAME predicate that
+    defines the ground-truth min-viable build the price bands are pinned to —
+    so Node 3 can never pick a part the floor computation would have excluded.
+
+    enforce_brand=False on purpose: ecosystem brand prefs are PREFERENCES, not
+    floors. The feasibility gate defines a 'tight' verdict as buildable only
+    after relaxing them, so hard-filtering brand here would dead-end builds the
+    gate already declared feasible. Slots with no numeric/type floor
+    (motherboard, psu, case, cooler, fans) pass through unchanged.
+    """
+    return slot_requirement_filter(slot, parts, req, brief, enforce_brand=False)
+
+
+def _fetch_floor(
+    pg: PostgresClient,
+    slot: ComponentSlot,
+    low: int,
+    high: int,
+    req: ResolvedRequirements,
+    brief: UserBuildBrief,
+) -> list[dict]:
+    """Catalog query with the requirement floor applied as a HARD filter.
+
+    This is the query-layer enforcement point — the same layer where in-stock
+    and price-band filtering already happen. A floor-violating part never leaves
+    this function, so it can never reach the shortlist or the LLM pick. Every
+    catalog fetch in the selection funnel (band, widened band, DDR4 pull, and
+    both full-catalog escalations) routes through here, so the escalation ladder
+    relaxes only the price band — never the floor.
+    """
+    parts = pg.get_parts_in_band(slot, low, high, in_stock=True)
+    return _floor_filter(slot, parts, req, brief)
+
+
+def _floor_desc(
+    slot: ComponentSlot, req: ResolvedRequirements, brief: UserBuildBrief
+) -> str:
+    """Human-readable description of a slot's resolved floor (for dead-ends)."""
+    if slot == ComponentSlot.gpu:
+        return f"≥{req.vram_gb} GB VRAM"
+    if slot == ComponentSlot.cpu:
+        return f"CPU tier {req.cpu_tier.name}"
+    if slot == ComponentSlot.ram:
+        return f"≥{req.ram_gb} GB capacity"
+    if slot == ComponentSlot.storage:
+        return f"≥{req.storage_gb} GB, {brief.storage.speed_tier}"
+    return "no floor"
+
+
+def _no_floor_message(
+    slot: ComponentSlot, req: ResolvedRequirements, brief: UserBuildBrief
+) -> str:
+    return (
+        f"No {slot.value} in stock meets the required floor "
+        f"({_floor_desc(slot, req, brief)}). Every in-catalog {slot.value} falls "
+        f"below this minimum for your workload. Consider relaxing the requirement "
+        f"or adjusting the target software / performance settings."
+    )
+
+
+def _ddr4_can_meet_ram_floor(brief: UserBuildBrief) -> bool:
+    """True if an in-stock DDR4 kit satisfies the brief's resolved RAM floor.
+
+    Gate for the tight-budget DDR4 bias: a verdict can be 'tight' for reasons
+    unrelated to the memory platform (e.g. brand preferences on the GPU), and
+    the catalog stocks no DDR4 kit above 32 GB — biasing a 48 GB+ build toward
+    DDR4 would strand the RAM floor entirely (found by scripts/calibration_sweep.py).
+    Fails open (True → old behaviour) when the catalog can't be read: with
+    Postgres down, no candidates exist to bias anyway.
+    """
+    try:
+        req = resolve_requirements(brief)
+        kits = PostgresClient().get_parts_in_band(
+            ComponentSlot.ram, 0, _FULL_CATALOG_HIGH, in_stock=True
+        )
+    except Exception:  # noqa: BLE001 — degrade to pre-gate behaviour
+        return True
+    return any(
+        _get_ddr_gen(k) == 4
+        and (k.get("specs") or {}).get("capacity_gb", 0) >= req.ram_gb
+        for k in kits
+    )
 
 
 def _ddr4_first(candidates: list[dict]) -> list[dict]:
@@ -216,33 +312,42 @@ def select_part(
     locked_parts: dict[ComponentSlot, str],
     fitness_thresholds: dict[ComponentSlot, float],
     neo4j_available: bool,
+    req: ResolvedRequirements,
     remaining_budget: int | None = None,
     ddr4_bias: bool = False,
 ) -> SlotOutcome:
     """Three-step funnel: Postgres catalog → Neo4j graph filter → LLM pick.
 
-    Compatibility against locked_parts is a HARD filter that is never bypassed:
-    the price band and the fitness threshold relax; compatibility does not. If the
-    (widened) band yields no compatible candidate, the band is escalated across the
-    full catalog to find one. Only when the entire catalog has no compatible part is
-    a "no_compatible" dead-end returned. When remaining_budget is supplied, a
-    compatible part whose price would breach the ceiling yields an "over_budget"
-    dead-end instead of a silent over-budget lock.
+    TWO hard filters are applied at the catalog-query layer and are NEVER
+    bypassed during escalation — only the price band (and later the fitness
+    threshold) relax:
+      • Requirement floor — GPU VRAM / CPU tier / RAM capacity / storage
+        capacity+type from resolve_requirements(). A floor-violating part never
+        reaches the shortlist (every fetch routes through _fetch_floor).
+      • Compatibility against locked_parts (socket / DDR gen / form factor).
+
+    If the (widened) band yields no candidate that passes both, the price band is
+    escalated across the full catalog. Dead-ends: "no_floor" (no in-stock part
+    meets the requirement floor at any price), "no_compatible" (floor-meeting
+    parts exist but none is compatible with locked parts), "over_budget" (a
+    valid part exists but the cheapest breaches the ceiling).
 
     Returns a SlotOutcome — inspect .part (None on any dead-end) and .status.
     """
     pg = PostgresClient()
 
-    # ── Step 1: Postgres catalog query (band, with one 20% widening retry) ────
-    candidates = pg.get_parts_in_band(slot, band.low, band.high, in_stock=True)
+    # ── Step 1: catalog query at the band, floor-filtered (20% widening retry) ─
+    # _fetch_floor applies the resolved requirement floor as a HARD filter inside
+    # the query layer, alongside in-stock and price-band filtering.
+    candidates = _fetch_floor(pg, slot, band.low, band.high, req, brief)
     if not candidates:
         widened_low = int(band.low * (1 - _BAND_WIDEN_FACTOR))
         widened_high = int(band.high * (1 + _BAND_WIDEN_FACTOR))
         logger.info(
-            "[Node3] %s: catalog empty at [%d–%d]; widening band to [%d–%d]",
+            "[Node3] %s: no floor-meeting stock at [%d–%d]; widening band to [%d–%d]",
             slot.value, band.low, band.high, widened_low, widened_high,
         )
-        candidates = pg.get_parts_in_band(slot, widened_low, widened_high, in_stock=True)
+        candidates = _fetch_floor(pg, slot, widened_low, widened_high, req, brief)
 
     # ── Step 1b: DDR4 preference bias (tight budget only) ───────────────────
     # On a tight budget the RAM slot is selected before Motherboard, so an
@@ -257,9 +362,11 @@ def select_part(
         ddr4_in_band = [c for c in candidates if _get_ddr_gen(c) == 4]
         if not ddr4_in_band:
             # Band floor excludes cheaper DDR4 — pull from the full affordable range.
+            # Floor-filtered: the DDR4 bias must not reintroduce a sub-floor kit
+            # (e.g. a 16 GB DDR4 kit against a 32 GB floor).
             ddr4_ceiling = int(band.high * (1 + _BAND_WIDEN_FACTOR))
             extra_ddr4 = [
-                c for c in pg.get_parts_in_band(slot, 0, ddr4_ceiling, in_stock=True)
+                c for c in _fetch_floor(pg, slot, 0, ddr4_ceiling, req, brief)
                 if _get_ddr_gen(c) == 4
             ]
             if extra_ddr4:
@@ -290,25 +397,41 @@ def select_part(
     if compat_active:
         working = _compatible_subset(neo4j, candidates, locked_parts, slot)
         if not working:
-            full = pg.get_parts_in_band(slot, 0, _FULL_CATALOG_HIGH, in_stock=True)
+            # Escalate the PRICE BAND across the full catalog. _fetch_floor keeps
+            # the requirement floor a hard filter; _compatible_subset keeps
+            # compatibility a hard filter. Neither is relaxed by escalation.
+            full = _fetch_floor(pg, slot, 0, _FULL_CATALOG_HIGH, req, brief)
+            if not full:
+                msg = _no_floor_message(slot, req, brief)
+                logger.warning("[Node3] %s: %s", slot.value, msg)
+                return SlotOutcome(status="no_floor", message=msg)
             working = _compatible_subset(neo4j, full, locked_parts, slot)
             if not working:
                 msg = _no_compatible_message(slot, locked_parts)
                 logger.warning("[Node3] %s: %s", slot.value, msg)
                 return SlotOutcome(status="no_compatible", message=msg)
             logger.info(
-                "[Node3] %s: no compatible part within price band — escalated to full "
-                "catalog, %d compatible candidate(s) found",
+                "[Node3] %s: no compatible floor-meeting part within price band — "
+                "escalated to full catalog, %d candidate(s) found",
                 slot.value, len(working),
             )
     else:
         working = candidates
         if not working:
-            logger.warning(
-                "[Node3] %s: catalog still empty after 20%% band widening — slot skipped",
-                slot.value,
+            # No compatibility rule applies (e.g. the first-locked slot), but the
+            # floor still does. Escalate the price band across the full catalog
+            # before declaring a dead-end — same ladder, floor never relaxed.
+            full = _fetch_floor(pg, slot, 0, _FULL_CATALOG_HIGH, req, brief)
+            if not full:
+                msg = _no_floor_message(slot, req, brief)
+                logger.warning("[Node3] %s: %s", slot.value, msg)
+                return SlotOutcome(status="no_floor", message=msg)
+            working = full
+            logger.info(
+                "[Node3] %s: no floor-meeting part within widened band — escalated "
+                "to full catalog, %d candidate(s) found",
+                slot.value, len(working),
             )
-            return SlotOutcome(status="no_stock")
 
     # ── Step 2b: budget-pool ceiling check (DESIGN §2.4 drift safeguard) ───────
     # Distinguishes "compatible-but-unaffordable" from "no compatible part".
@@ -408,26 +531,38 @@ def select_build(
     """Walk SELECTION_ORDER and fill each slot via the three-step funnel.
 
     Safeguards applied during the walk:
+      • Requirement-floor hard filter: every catalog fetch drops parts below the
+        slot's resolved floor (VRAM / CPU tier / RAM & storage capacity, storage
+        type) before shortlisting — never a post-pick check.
       • Running budget-pool tracker: each slot is solved against the remaining
         headroom to the ceiling; a compatible-but-unaffordable slot dead-ends.
-      • Lookahead probe after GPU + CPU lock: warns if no compatible
-        motherboard exists in the current band before continuing.
+      • Lookahead probe after GPU + CPU lock: warns if no floor-meeting,
+        compatible motherboard exists in the current band before continuing.
       • Post-lock compatibility validator: refuses to lock (does not merely log)
         any part Neo4j flags as conflicting with an already-locked part.
-      • Dead-end surfacing: no_compatible / over_budget outcomes are collected as
-        plain-English warnings on the returned BuildCard.
+      • Dead-end surfacing: no_floor / no_compatible / over_budget outcomes are
+        collected as plain-English warnings on the returned BuildCard.
     """
     # ── Upfront checks ────────────────────────────────────────────────────────
     neo4j_available: bool = Neo4jClient().ping()
     if not neo4j_available:
         logger.info("[Node3] Neo4j unreachable — graph filter disabled for all slots")
 
+    # Resolved requirement floors, computed once and applied as a hard filter in
+    # every catalog fetch (mirrors how compatibility thresholds are derived once).
+    req = resolve_requirements(brief)
+
     tight_budget = (
         feasibility_verdict is not None
         and feasibility_verdict.verdict == "tight"
     )
+    ddr4_bias = tight_budget and _ddr4_can_meet_ram_floor(brief)
     if tight_budget:
-        logger.info("[Node3] tight budget detected — DDR4 preference bias enabled for RAM")
+        logger.info(
+            "[Node3] tight budget detected — DDR4 preference bias %s for RAM",
+            "enabled" if ddr4_bias else
+            "DISABLED (no in-stock DDR4 kit meets the resolved RAM floor)",
+        )
 
     fitness_thresholds = derive_fitness_thresholds(brief)
     logger.info(
@@ -461,8 +596,8 @@ def select_build(
             and neo4j_available
         ):
             pg_probe = PostgresClient()
-            mb_candidates = pg_probe.get_parts_in_band(
-                ComponentSlot.motherboard, band.low, band.high, in_stock=True
+            mb_candidates = _fetch_floor(
+                pg_probe, ComponentSlot.motherboard, band.low, band.high, req, brief
             )
             neo4j_probe = Neo4jClient()
             compatible_mb = neo4j_probe.compatibility_check(
@@ -487,8 +622,9 @@ def select_build(
             locked_parts=locked_parts,
             fitness_thresholds=fitness_thresholds,
             neo4j_available=neo4j_available,
+            req=req,
             remaining_budget=remaining_budget,
-            ddr4_bias=(tight_budget and slot == ComponentSlot.ram),
+            ddr4_bias=(ddr4_bias and slot == ComponentSlot.ram),
         )
         if outcome.part is None:
             # no_compatible / over_budget carry a plain-English message to surface;
