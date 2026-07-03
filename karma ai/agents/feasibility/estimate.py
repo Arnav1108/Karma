@@ -71,7 +71,8 @@ _SYSTEM = (
     "Set 'binding_constraint' to the component or requirement that drives the cost (usually "
     "the GPU/VRAM, sometimes the CPU). For 'tight' or 'impossible', give concrete "
     "'suggested_adjustments' (e.g. raise budget, lower target resolution, relax form-factor "
-    "or brand constraints). Keep 'reason' brief and concrete."
+    "or brand constraints). Keep 'reason' brief and concrete. "
+    "Set 'basis' to 'llm_fallback'."
 )
 
 _SYSTEM_PROSE = (
@@ -82,7 +83,8 @@ _SYSTEM_PROSE = (
     "'binding_constraint' (the component or requirement that drives the cost), "
     "and for 'tight' or 'impossible' verdicts give concrete 'suggested_adjustments' "
     "(e.g. raise budget, relax a brand preference, lower target resolution). "
-    "Return the given verdict verbatim in the 'verdict' field."
+    "Return the given verdict verbatim in the 'verdict' field. "
+    "Set 'basis' to 'deterministic'."
 )
 
 
@@ -273,8 +275,8 @@ def estimate_feasibility(brief: UserBuildBrief) -> FeasibilityVerdict:
                 "[Feasibility] LLM tried to change the verdict (%s → %s) — overridden",
                 verdict, result.verdict,
             )
-        # The verdict is code-owned on this path; the LLM only narrates.
-        return result.model_copy(update={"verdict": verdict})
+        # The verdict and basis are code-owned on this path; the LLM only narrates.
+        return result.model_copy(update={"verdict": verdict, "basis": "deterministic"})
 
     # Degraded mode: catalog unreachable — single-anchor LLM estimate.
     logger.warning("[Feasibility] catalog floor unavailable — falling back to LLM estimate")
@@ -282,4 +284,5 @@ def estimate_feasibility(brief: UserBuildBrief) -> FeasibilityVerdict:
     binding_slot = _binding_slot(req)
     anchor_inr, anchor_error = _fetch_anchor(binding_slot)
     prompt = _build_prompt(brief, req, scope, binding_slot, anchor_inr, anchor_error)
-    return call_structured(prompt, FeasibilityVerdict, system=_SYSTEM)
+    result = call_structured(prompt, FeasibilityVerdict, system=_SYSTEM)
+    return result.model_copy(update={"basis": "llm_fallback"})

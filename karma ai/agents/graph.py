@@ -103,6 +103,7 @@ def node_feasibility(state: PipelineState) -> PipelineState:
         from agents.schemas import FeasibilityVerdict
         verdict = FeasibilityVerdict(
             verdict="comfortable",
+            basis="stub",
             reason="[STUB] estimate_feasibility not available",
             binding_constraint=None,
             suggested_adjustments=[],

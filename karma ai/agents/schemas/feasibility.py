@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 class FeasibilityVerdict(BaseModel):
     verdict: Literal["comfortable", "tight", "impossible"]
+    basis: Literal["deterministic", "llm_fallback", "stub"]
     reason: str
     binding_constraint: str | None = None
     suggested_adjustments: list[str] = []

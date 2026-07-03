@@ -141,6 +141,7 @@ def _stub_estimate_feasibility(brief: UserBuildBrief) -> FeasibilityVerdict:
     print("  [STUB] estimate_feasibility not available  -  returning comfortable verdict.")
     return FeasibilityVerdict(
         verdict="comfortable",
+        basis="stub",
         reason="[STUB] Cannot estimate without estimate module  -  real call goes here.",
         binding_constraint=None,
         suggested_adjustments=[],
