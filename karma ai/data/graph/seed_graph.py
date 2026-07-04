@@ -28,20 +28,22 @@ _USE_CASES = [
 # These are placeholder defaults — replace with benchmark-derived values once
 # real performance data is available. PSU / case / cooler / fans are omitted
 # intentionally; they have no meaningful fitness score for a use-case.
+# gpu.work_productivity, gpu.storage_homeserver, and cpu.storage_homeserver are
+# omitted too: a flat non-null stub weight here blocks fitness_filter's
+# null-weight fail-open path, so a low flat number (e.g. gpu 0.4/0.2) silently
+# filters those use-cases down to zero GPU candidates instead of passing
+# everything through unweighted like an un-scored slot would.
 _GOOD_FOR_WEIGHTS: dict[ComponentSlot, dict[str, float]] = {
     ComponentSlot.gpu: {
         "gaming":             0.9,
         "content_creation":   0.7,
-        "work_productivity":  0.4,
         "general_use":        0.5,
-        "storage_homeserver": 0.2,
     },
     ComponentSlot.cpu: {
         "gaming":             0.6,
         "content_creation":   0.7,
         "work_productivity":  0.9,
         "general_use":        0.6,
-        "storage_homeserver": 0.5,
     },
     ComponentSlot.ram: {
         "gaming":             0.5,
