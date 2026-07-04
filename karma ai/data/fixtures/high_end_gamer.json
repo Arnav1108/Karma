@@ -1,0 +1,135 @@
+{
+  "brief_id": "d4e5f6a7-b8c9-0123-def0-234567890123",
+  "user_id": "e5f6a7b8-c9d0-1234-ef01-345678901234",
+  "chat_id": "f6a7b8c9-d0e1-2345-f012-456789012345",
+  "build_id": null,
+  "schema_version": "1.0.0",
+  "status": "locked",
+  "completeness": {
+    "required_complete": true,
+    "optional_filled": 3,
+    "optional_skipped": 0
+  },
+  "open_questions": [],
+  "created_at": "2026-07-04T10:00:00Z",
+  "updated_at": "2026-07-04T10:30:00Z",
+
+  "budget": {
+    "currency": "INR",
+    "comfortable_min": 300000,
+    "comfortable_max": 340000,
+    "ceiling": 380000,
+    "scope": "pc_only",
+    "notes": null
+  },
+
+  "purpose": {
+    "primary_use_case": "gaming",
+    "sub_case": "open_world_aaa",
+    "secondary_use_cases": []
+  },
+
+  "software": [
+    {
+      "name": "Cyberpunk 2077",
+      "category": "game",
+      "frequency": "primary",
+      "intensity": "heavy"
+    },
+    {
+      "name": "Alan Wake 2",
+      "category": "game",
+      "frequency": "primary",
+      "intensity": "heavy"
+    },
+    {
+      "name": "Baldur's Gate 3",
+      "category": "game",
+      "frequency": "secondary",
+      "intensity": "moderate"
+    }
+  ],
+
+  "performance": {
+    "target_resolution": "4K",
+    "target_framerate": 144,
+    "hdr_wanted": true,
+    "source": "user_stated"
+  },
+
+  "monitor": {
+    "owned": "yes",
+    "owned_specs": {
+      "resolution": "4K",
+      "refresh_hz": 144,
+      "hdr": true,
+      "size_inch": 32.0
+    },
+    "target_specs": null,
+    "count": 1,
+    "source": "user_stated"
+  },
+
+  "peripherals": [
+    {
+      "type": "keyboard",
+      "requirements": "mechanical switches",
+      "priority": "nice_to_have"
+    },
+    {
+      "type": "mouse",
+      "requirements": "high polling rate",
+      "priority": "nice_to_have"
+    }
+  ],
+
+  "storage": {
+    "capacity_gb": 2000,
+    "speed_tier": "nvme",
+    "data_profile": "hot",
+    "source": "inferred"
+  },
+
+  "operating_system": {
+    "os": "windows",
+    "license": "oem",
+    "source": "default_applied"
+  },
+
+  "existing": {
+    "has_existing_parts": "no",
+    "reuse_parts": [],
+    "existing_pc_build_id": null,
+    "ecosystem_prefs": {
+      "cpu_brand_pref": null,
+      "gpu_brand_pref": null
+    }
+  },
+
+  "physical": {
+    "form_factor_pref": "atx_mid",
+    "noise_tolerance": "balanced",
+    "placement": "open_desk",
+    "portability_need": false,
+    "size_notes": null
+  },
+
+  "longevity": {
+    "reliability_priority": "consumer",
+    "upgrade_path": "future_proof",
+    "timeline": "buy_now"
+  },
+
+  "extras": {
+    "rgb_pref": "want_rgb",
+    "visual_style": "no_preference",
+    "connectivity_needs": ["wifi"],
+    "specific_part_requests": []
+  },
+
+  "hard_constraints": {
+    "must_have": [],
+    "must_not": [],
+    "rejected_parts": []
+  }
+}

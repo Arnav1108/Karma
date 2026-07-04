@@ -234,25 +234,35 @@ class Neo4jClient:
         fitness_threshold: float,
     ) -> list[str]:
         """
-        Return candidates whose GOOD_FOR edge tier meets fitness_threshold.
+        Rank candidates by GOOD_FOR fitness for use_case — never excludes one.
 
-        fitness_threshold is a continuous 0.0-1.0 value (from derive_fitness_thresholds);
-        it's converted once via _required_tier() into the coarse 0-4 ordinal that
-        GOOD_FOR.tier uses, then candidates are filtered on tier and ranked within
-        the passing shortlist by the continuous GOOD_FOR.score tie-break.
+        fitness_threshold is a continuous 0.0-1.0 value (from derive_fitness_thresholds).
+        _required_tier() maps it to the coarse 0-4 ordinal GOOD_FOR.tier uses, but that
+        tier is now a SOFT tie-break only, not a hard cutoff: candidates are ranked by
+        the continuous GOOD_FOR.score (descending) as the primary signal, with
+        "meets required_tier" breaking ties. This is deliberate — required_tier is a
+        budget-blind, catalog-wide bar (e.g. gaming's GPU threshold is uniformly tier 4,
+        the catalog's flagship band) while the candidates here are already restricted to
+        one price band; hard-excluding by tier silently emptied the shortlist for most
+        gaming builds and fell through to the unranked fail-open below, so fitness never
+        actually influenced GPU/CPU selection except at the top of the market. See
+        docs/context.md open item 4.
 
         Components with no GOOD_FOR edge for use_case are included by default
         (fail open) — sparse graph coverage must not exclude valid candidates.
-        Results are ordered: tier passes (highest score first) then unranked fail-opens.
+        Results are ordered: all scored candidates (score descending, tier as a
+        tie-break) then unranked fail-opens.
 
         Args:
             candidate_product_ids: Product IDs to filter.
             use_case: Target use-case name matching UseCase.name in the graph.
-            fitness_threshold: Minimum fitness in [0.0, 1.0], mapped to a required tier.
-                               0.0 returns all candidates that have an edge, plus unranked.
+            fitness_threshold: Fitness in [0.0, 1.0], mapped to a required tier used
+                               only to break score ties, never to drop a candidate.
 
         Returns:
-            Filtered list: tier passes ranked by score descending, then unranked fall-opens.
+            Ranked list: every candidate with a GOOD_FOR edge (score descending, tier
+            tie-break), then unranked fail-opens. Never shorter than the input
+            (barring driver failure, which falls back to the input order unchanged).
         """
         if not candidate_product_ids:
             return []
@@ -264,7 +274,7 @@ class Neo4jClient:
         except Exception:
             return list(candidate_product_ids)
 
-        ranked: list[tuple[str, float]] = []
+        scored: list[tuple[str, int, float]] = []
         unranked: list[str] = []
 
         with driver.session() as session:
@@ -278,12 +288,13 @@ class Neo4jClient:
                 if tier is None:
                     # Component absent from graph or has no GOOD_FOR edge → fail open.
                     unranked.append(product_id)
-                elif int(tier) >= required_tier:
-                    ranked.append((product_id, float(record["score"])))
-                # tier < required_tier → excluded
+                else:
+                    scored.append((product_id, int(tier), float(record["score"])))
 
-        ranked.sort(key=lambda x: x[1], reverse=True)
-        return [pid for pid, _ in ranked] + unranked
+        # Primary: score descending. Tie-break only: meeting required_tier, then tier
+        # itself — never a reason to drop a candidate, only to order equal scores.
+        scored.sort(key=lambda x: (x[2], x[1] >= required_tier, x[1]), reverse=True)
+        return [pid for pid, _, _ in scored] + unranked
 
     def get_component_fitness(
         self,

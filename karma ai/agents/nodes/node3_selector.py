@@ -494,6 +494,10 @@ def select_part(
         working = affordable
 
     # ── Step 2c: fitness ordering (relaxable — fail-open, never a hard cut) ────
+    # fitness_ranked tracks whether `working`'s order actually reflects the fitness
+    # signal, so Step 3's prompt can surface that ranking instead of silently
+    # numbering a catalog-order list as if it meant something it doesn't.
+    fitness_ranked = False
     if neo4j_available:
         by_id = {c["product_id"]: c for c in working}
         fit_ids = neo4j.fitness_filter(
@@ -505,6 +509,7 @@ def select_part(
             reordered = [by_id[pid] for pid in fit_ids if pid in by_id]
             if reordered:
                 working = reordered
+                fitness_ranked = True
         else:
             logger.info(
                 "[Node3] %s: fitness_filter returned empty (threshold %.2f) — keeping "
@@ -515,9 +520,17 @@ def select_part(
     shortlist_dicts = working[:_MAX_SHORTLIST]
 
     # ── Step 3: LLM final pick ────────────────────────────────────────────────
+    # Step 3 previously had no visibility into fitness rank, so on high-threshold
+    # builds it would independently "value-optimize" down from the top-fitness pick
+    # to a cheaper, lower-tier one — a regression only exposed once fitness_filter
+    # stopped hard-excluding low tiers and started handing it real alternatives
+    # (docs/context.md open item 4). Surfacing the rank + threshold below makes
+    # fitness a signal the LLM weighs, not one it's blind to — it is NOT a hard
+    # pin to rank #1; a lower-ranked pick can still legitimately win on value.
     parts_text = "\n".join(
-        "  [{idx}] product_id={pid} | {name} by {brand} | ₹{price:,} | specs: {specs}".format(
+        "  [{idx}]{rank_tag} product_id={pid} | {name} by {brand} | ₹{price:,} | specs: {specs}".format(
             idx=i + 1,
+            rank_tag=f" (fitness rank #{i + 1})" if fitness_ranked else "",
             pid=p.get("product_id", ""),
             name=p.get("name", "N/A"),
             brand=p.get("brand", "N/A"),
@@ -531,6 +544,17 @@ def select_part(
     ) or "none"
     software_text = ", ".join(s.name for s in brief.software) or "none"
 
+    fitness_context = ""
+    if fitness_ranked:
+        fitness_context = (
+            f"  Fitness     : this build's derived requirement level for {slot.value} "
+            f"is {fitness_thresholds[slot]:.2f} (0.0-1.0, higher = more critical to the "
+            f"use case). Options are listed best-fit-first per that signal (not by "
+            f"price) — weigh fitness rank alongside price/specs; don't default to a "
+            f"lower-ranked option purely because it's cheaper, but it can still win on "
+            f"genuine value.\n"
+        )
+
     prompt = (
         f"You are a PC building expert. Select the single best {slot.value.upper()} "
         f"for this user build.\n\n"
@@ -539,10 +563,13 @@ def select_part(
         f"  Software    : {software_text}\n"
         f"  Target      : {brief.performance.target_resolution} @ "
         f"{brief.performance.target_framerate} fps\n"
-        f"  Constraints : {constraints_text}\n\n"
-        f"SHORTLISTED {slot.value.upper()} OPTIONS ({len(shortlist_dicts)} parts)\n"
+        f"  Constraints : {constraints_text}\n"
+        f"{fitness_context}\n"
+        f"SHORTLISTED {slot.value.upper()} OPTIONS ({len(shortlist_dicts)} parts"
+        f"{', best-fit-first' if fitness_ranked else ''})\n"
         f"{parts_text}\n\n"
-        "Pick the best value-for-money option for the use case. "
+        "Pick the best value-for-money option for the use case, weighing the fitness "
+        "signal above alongside price and specs. "
         "Return the exact product_id and a one-sentence justification."
     )
     picked = call_structured(prompt, SelectedPart)

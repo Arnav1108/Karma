@@ -131,13 +131,42 @@ no code changes. Do not re-open these as mysteries.**
    FeasibilityVerdict so the silent Postgres-unreachable fallback is
    distinguishable in output (ticket drafted 2026-07-04, see verdict
    investigation above; implementation deferred to a separate session)
-4. **Gaming fitness threshold calibration** — a gaming threshold of 0.85 maps
-   to `required_tier` 4, which only 2/13 in-stock GPUs pass regardless of
-   budget, so most gaming profiles land in the fail-open rescue path instead
-   of getting real tier-based ranking (observed 2026-07-04 while verifying the
-   tier/score `fitness_filter` migration, commit `1a69bb0`). Needs a look at
-   either `derive_fitness_thresholds` calibration or the tier cut points —
-   not yet investigated.
+4. **Gaming fitness threshold calibration — RESOLVED (2026-07-04,
+   `phase4/fitness-filter-softgate`).** Root cause confirmed via live
+   diagnostics against all 7 fixtures + a new `high_end_gamer` control fixture:
+   `fitness_filter` converted the budget-blind `derive_fitness_thresholds`
+   value into an absolute catalog-wide `required_tier` via
+   `min(4, int(threshold*5))` and hard-excluded anything below it. Gaming's
+   GPU threshold is uniformly 0.85 → tier 4 (catalog flagships) regardless of
+   budget, and no gaming fixture's price band ever reached tier 3+, so
+   `fitness_filter` returned `[]` for nearly every gaming build, silently
+   triggering the fail-open in `node3_selector.py` and leaving fitness with no
+   real influence over GPU/CPU selection except at the top of the market.
+   Confirmed present (lower frequency, masked by one non-monotonic outlier)
+   on CPU too.
+   Fix, two parts:
+   - `agents/db/neo4j.py::fitness_filter` — `required_tier` is now a soft
+     tie-break, never a hard cutoff. All in-band candidates with a `GOOD_FOR`
+     edge are ranked by continuous `score` (descending); no-edge candidates
+     still pass through unranked (fail-open semantics unchanged).
+   - `agents/nodes/node3_selector.py::select_part` Step 3 — the LLM final-pick
+     prompt previously had no visibility into fitness rank, so once the
+     shortlist was widened by the fix above, it would independently
+     "value-optimize" down from the top-fitness pick to a cheaper, lower-tier
+     part — a regression only exposed by fixing the exclusion bug. The prompt
+     now states each candidate's fitness rank and the slot's derived
+     threshold, as a signal to weigh alongside price/specs — deliberately not
+     a hard pin to rank 1.
+   Verified live (real Node 3 path, not `calibration_sweep.py`) across all 8
+   fixtures: fail-open never fires (0/16 slot checks across two full runs);
+   `fitness_filter`'s own ranking always puts the top-tier/top-score candidate
+   at rank 1 (confirmed independently of Step 3). `high_end_gamer` picks
+   gpu-012 (tier 4, rank 1) end to end. One residual: `ml_workstation`'s CPU
+   pick landed at rank 2/tier 3 in the verification run because
+   `derive_fitness_thresholds` itself returned 0.75 instead of 0.80 that run
+   (required_tier 3 vs 4) — separate, pre-existing LLM-threshold variance,
+   not a regression from this fix; not further pursued per this session's
+   scope.
 
 **Housekeeping — DONE (2026-07-03).** CLAUDE.md, karma ai/DESIGN.md, docs/
 synced against the calibration + floor-enforcement commits and merged to main:
