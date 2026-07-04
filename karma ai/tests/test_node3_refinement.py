@@ -327,3 +327,100 @@ def test_rescale_budget_proportional(budget_gamer_brief):
     new = rescale_budget(brief, old_ceiling * 2)
     assert new.budget.ceiling == old_ceiling * 2
     assert new.budget.comfortable_max == old_max * 2
+
+
+# ── software list merge (not full-replacement) ────────────────────────────────
+# Gap closed before merge: brief_edit's patch_brief_field used to do a blind
+# `ref[path[-1]] = value` for every field, including list-valued ones. Since
+# parse_refinement_request only sees ONE turn's message, an LLM asked to edit
+# "software" for "also add Blender" has no reliable view of the brief's other
+# entries — a naive full-replacement patch would silently drop them. These
+# tests pin down that budget_gamer_brief's existing 3-entry software list
+# (Valorant, CS2, GTA V — see data/fixtures/budget_gamer.json) survives an
+# additive edit that only mentions a new item.
+
+def test_patch_software_add_preserves_existing_entries(budget_gamer_brief):
+    """'also add Blender' → value=[Blender] must NOT drop Valorant/CS2/GTA V."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    existing_names = {s.name for s in brief.software}
+    assert existing_names == {"Valorant", "CS2", "GTA V"}, (
+        "fixture assumption changed — update this test's expectations"
+    )
+
+    patched = patch_brief_field(
+        brief, "software",
+        [{"name": "Blender", "category": "3d", "frequency": "secondary", "intensity": "moderate"}],
+    )
+
+    names = {s.name for s in patched.software}
+    assert names == existing_names | {"Blender"}, (
+        f"expected existing entries preserved plus Blender, got {names}"
+    )
+    assert len(patched.software) == 4
+    # Original untouched (patch_brief_field must not mutate in place).
+    assert len(brief.software) == 3
+
+
+def test_patch_software_add_single_dict_value_also_preserved(budget_gamer_brief):
+    """A single-object value (not wrapped in a list) must merge the same way."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    patched = patch_brief_field(
+        brief, "software",
+        {"name": "VS Code", "category": "dev", "frequency": "occasional", "intensity": "casual"},
+    )
+    names = {s.name for s in patched.software}
+    assert names == {"Valorant", "CS2", "GTA V", "VS Code"}
+
+
+def test_patch_software_update_existing_by_name_no_duplicate(budget_gamer_brief):
+    """Re-mentioning an existing title (e.g. changed intensity) updates in place."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    patched = patch_brief_field(
+        brief, "software",
+        [{"name": "CS2", "category": "game", "frequency": "primary", "intensity": "heavy"}],
+    )
+    assert len(patched.software) == 3, "matching name must update, not duplicate"
+    cs2 = next(s for s in patched.software if s.name == "CS2")
+    assert cs2.intensity == "heavy"
+    # Untouched entries keep their original values.
+    valorant = next(s for s in patched.software if s.name == "Valorant")
+    assert valorant.intensity == "casual"
+
+
+def test_dispatch_additive_software_edit_preserves_list_end_to_end(monkeypatch, budget_gamer_brief):
+    """Full path: parse_refinement_request -> dispatch_refinement must not lose entries.
+
+    Mocks call_structured to return exactly what a real LLM is instructed to
+    return per the updated prompt (only the new entry), proving the merge
+    happens regardless of which layer (prompt compliance vs. patch logic) is
+    doing the work — dispatch_refinement is what actually reaches the brief.
+    """
+    brief = budget_gamer_brief.model_copy(deep=True)
+
+    def fake_call_structured(prompt, response_model, **kwargs):
+        return RefinementOps(
+            brief_edit={
+                "field": "software",
+                "value": [{"name": "Blender", "category": "3d",
+                          "frequency": "secondary", "intensity": "moderate"}],
+            }
+        )
+
+    monkeypatch.setattr(refine, "call_structured", fake_call_structured)
+
+    class _V:
+        verdict = "comfortable"
+
+    monkeypatch.setattr(refine, "estimate_feasibility", lambda b: _V())
+    monkeypatch.setattr(refine, "_select_build_with_pins", lambda *a, **k: _STUB_CARD)
+    monkeypatch.setattr(refine, "diff_and_bias", lambda old, new, *a, **k: new)
+
+    ops = refine.parse_refinement_request(
+        "also add Blender for some 3D work", brief, _STUB_CARD
+    )
+    result = dispatch_refinement(ops, brief, _bands(gpu=(20000, 25000, 30000)), _STUB_CARD, {})
+
+    names = {s.name for s in result.brief.software}
+    assert names == {"Valorant", "CS2", "GTA V", "Blender"}, (
+        f"existing software entries were dropped by the additive edit: {names}"
+    )

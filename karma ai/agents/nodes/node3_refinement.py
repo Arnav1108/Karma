@@ -119,14 +119,20 @@ def parse_refinement_request(
         f"  {p.slot.value}: {p.name} (product_id={p.product_id}, ₹{p.price_inr:,})"
         for p in build_card.parts
     ) or "  (no parts selected)"
+    software_summary = "\n".join(
+        f"  - {s.name} ({s.category}, {s.frequency}, {s.intensity})"
+        for s in brief.software
+    ) or "  (none listed)"
 
     prompt = f"""You are parsing a user's refinement request for a PC build recommendation.
 
 Current build:
 {build_summary}
 
-Current use case : {brief.purpose.primary_use_case} / {brief.purpose.sub_case}
-Current ceiling  : ₹{brief.budget.ceiling:,}
+Current use case      : {brief.purpose.primary_use_case} / {brief.purpose.sub_case}
+Current ceiling       : ₹{brief.budget.ceiling:,}
+Current software list :
+{software_summary}
 
 User said: "{user_input}"
 
@@ -148,6 +154,14 @@ several fields at once. Leave a field null/false when it does not apply.
     Use for: "software", "performance", "extras", "physical", "longevity".
     Examples: "target 1440p 144fps" → field=performance,
       value={{"target_resolution":"1440p","target_framerate":144,"source":"user_stated"}}.
+    IMPORTANT for "software": the user's EXISTING software list is merged in
+      automatically by name — value must be ONLY the new/changed entr(y/ies),
+      as a list of {{"name","category","frequency","intensity"}} objects. Do
+      NOT re-list software the user didn't mention this turn.
+      Example: "also add Blender for some 3D work" with an existing list of
+      Valorant/CS2/GTA V → field=software,
+      value=[{{"name":"Blender","category":"3d","frequency":"secondary","intensity":"moderate"}}]
+      (NOT the full list — Valorant/CS2/GTA V are kept automatically).
 
 - budget_change (int): a NEW TOTAL budget ceiling in INR. "90k" → 90000,
     "1.5 lakh" → 150000.
@@ -169,23 +183,66 @@ Return ONLY the JSON object."""
 
 # ── Brief patch helpers (pure) ────────────────────────────────────────────────
 
+def _merge_list_field(existing: list, incoming: Any) -> list:
+    """Upsert semantics for a list-valued additive field (e.g. `software`).
+
+    The LLM classifying one turn only sees that turn's message — it has no
+    reliable view of the brief's full existing list. Treating its returned
+    value as a full replacement would silently drop every entry it didn't
+    mention: "also add Blender" against a 3-entry software list must not turn
+    into a 1-entry list. So `incoming` is treated as item(s) to upsert, not the
+    final list: entries are matched against existing ones by a case-insensitive
+    `name`, updating a match in place and appending anything new. Order of
+    existing entries is preserved; new entries append at the end.
+    """
+    items = incoming if isinstance(incoming, list) else [incoming]
+    merged = list(existing)
+    index_by_name = {
+        str(item.get("name", "")).strip().lower(): i
+        for i, item in enumerate(merged)
+        if isinstance(item, dict) and item.get("name")
+    }
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("name", "")).strip().lower()
+        if key and key in index_by_name:
+            merged[index_by_name[key]] = item
+        else:
+            merged.append(item)
+            if key:
+                index_by_name[key] = len(merged) - 1
+    return merged
+
+
 def patch_brief_field(
     brief: UserBuildBrief, field_name: str, value: Any
 ) -> UserBuildBrief:
-    """Return a new brief with `field_name` set to `value`, re-validated.
+    """Return a new brief with `field_name` patched in, re-validated.
 
     Uses the dotted-path table so both additive ("software") and structural
     ("budget.scope") fields resolve to the right nested location. Falls back to a
-    flat top-level attribute for an unmapped field. Re-validates through
-    UserBuildBrief so a malformed LLM value raises a ValidationError the caller
-    can trap rather than silently corrupting the brief.
+    flat top-level attribute for an unmapped field.
+
+    List-valued fields (currently only `software`) are MERGED via
+    `_merge_list_field`, not replaced — the LLM's `value` is item(s) to upsert.
+    Scalar/object fields (performance, extras, physical, longevity,
+    primary_use_case, budget.scope) replace wholesale, matching what the LLM
+    was asked to produce for those.
+
+    Re-validates through UserBuildBrief so a malformed LLM value raises a
+    ValidationError the caller can trap rather than silently corrupting the brief.
     """
     data = brief.model_dump(mode="python")
     path = _FIELD_PATHS.get(field_name, (field_name,))
     ref = data
     for key in path[:-1]:
         ref = ref[key]
-    ref[path[-1]] = value
+    existing = ref.get(path[-1])
+    if isinstance(existing, list):
+        ref[path[-1]] = _merge_list_field(existing, value)
+    else:
+        ref[path[-1]] = value
     return UserBuildBrief.model_validate(data)
 
 
