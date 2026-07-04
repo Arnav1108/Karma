@@ -150,16 +150,33 @@ def node_allocate(state: PipelineState) -> PipelineState:
 
 
 def node_select(state: PipelineState) -> PipelineState:
-    """Run Node 3 part selection and store the build card."""
+    """Run Node 3 part selection and store the build card.
+
+    Rehydrates the ThresholdCache from the incoming state's fitness_thresholds /
+    fitness_thresholds_key (if present) so select_build's cache-hit check
+    (_threshold_key(brief) == cache.key) can actually fire across repeated
+    node_select invocations, instead of re-deriving thresholds every call.
+    """
     if not _HAS_SELECT:
         return {  # type: ignore[return-value]
             "current_node": "done",
         }
 
+    from agents.schemas import ComponentSlot
+
     brief = state.get("current_brief")
     bands = state.get("price_bands")
     verdict = state.get("feasibility_verdict")
-    cache = ThresholdCache()
+
+    stored_thresholds = state.get("fitness_thresholds")
+    cache = ThresholdCache(
+        thresholds=(
+            {ComponentSlot(s): v for s, v in stored_thresholds.items()}
+            if stored_thresholds
+            else None
+        ),
+        key=state.get("fitness_thresholds_key"),
+    )
     build_card = select_build(brief, bands, feasibility_verdict=verdict, cache=cache)
 
     return {  # type: ignore[return-value]
