@@ -1,3 +1,39 @@
+## Karma Advisor — state as of 2026-07-04
+
+**Feasibility verdict investigation: both open questions CLOSED (2026-07-04),
+no code changes. Do not re-open these as mysteries.**
+- **budget_gamer "tight" is CORRECT** (re-confirmed — second time; see the
+  2026-07-02 note "tight was always CORRECT"). Min build ₹66,000 = 104% of the
+  core target ₹63,500; with the ₹1,500 OS the total ₹67,500 exceeds
+  comfortable_max ₹65,000 and fits only under the ₹70,000 ceiling. Not a
+  _TIGHT_RATIO calibration artifact (ratio is above 1.0, so any threshold ≤ 1.0
+  still says tight) and not prompt calibration (verdict is code-owned since
+  6ea3920; the LLM writes prose only and is overridden if it disagrees). The
+  "expected comfortable" intuition is about real-world Indian market pricing,
+  not this catalog: the cheapest in-stock GPU is ₹27,500 (RTX 4060; the only
+  cheaper card, gpu-008 RX 7600 XT ₹26,500, is out of stock), eating 43% of the
+  target pool. Even with all resolver floors relaxed the min build is ~₹62,500
+  (98% of target) — still tight. Re-open only if the catalog gains a genuine
+  budget GPU tier.
+- **video_editor "impossible" DOES NOT REPRODUCE.** Live estimate_feasibility
+  and the deterministic sweep both return tight (binding = brand preferences):
+  hard/NVIDIA floor ₹154,700 > core ceiling ₹143,500 (cheapest in-stock NVIDIA
+  16 GB card is ₹76,000), soft floor ₹120,700 (RX 7800 XT ₹42,000) fits with
+  ₹22,800 headroom — hand-verified as a real compatible in-stock build (48 GB
+  RAM floor forces the single 64 GB DDR5 kit ₹22,000 → DDR5 board; cheapest
+  ≥8-core platform is i5-14400F ₹16,500 + DDR5 LGA1700 board ₹15,000). Stock
+  drift ruled out: seed.sql has exactly one commit and the AMD 16 GB cards
+  (gpu-009/013/014) have been in_stock=TRUE since day one. The "impossible"
+  observation was almost certainly the legacy single-anchor LLM path — either a
+  run predating 6ea3920 (LLM owned the verdict then; documented as flipping
+  between identical runs) or a post-merge run with Postgres unreachable, which
+  silently falls back to that same path.
+- Diagnostic gap exposed: FeasibilityVerdict carries no provenance, so a silent
+  LLM fallback is indistinguishable in output from a real deterministic
+  verdict — which is how a stale "impossible" got reported as current
+  behaviour. Ticket drafted for `basis: deterministic | llm_fallback` field
+  (open item 3); implementation deferred.
+
 ## Karma Advisor — state as of 2026-07-03
 
 **Node 3 requirement-floor enforcement: DONE (2026-07-03), query-layer hard filter.**
@@ -91,6 +127,17 @@
    replacing it with real data is higher-stakes than before.
 2. **Aura migration** — infra is local Docker only, not reachable by deployed
    backend; required pre-production (env swap only, seed is idempotent)
+3. **Verdict provenance** — add `basis: deterministic | llm_fallback` to
+   FeasibilityVerdict so the silent Postgres-unreachable fallback is
+   distinguishable in output (ticket drafted 2026-07-04, see verdict
+   investigation above; implementation deferred to a separate session)
+4. **Gaming fitness threshold calibration** — a gaming threshold of 0.85 maps
+   to `required_tier` 4, which only 2/13 in-stock GPUs pass regardless of
+   budget, so most gaming profiles land in the fail-open rescue path instead
+   of getting real tier-based ranking (observed 2026-07-04 while verifying the
+   tier/score `fitness_filter` migration, commit `1a69bb0`). Needs a look at
+   either `derive_fitness_thresholds` calibration or the tier cut points —
+   not yet investigated.
 
 **Housekeeping — DONE (2026-07-03).** CLAUDE.md, karma ai/DESIGN.md, docs/
 synced against the calibration + floor-enforcement commits and merged to main:
