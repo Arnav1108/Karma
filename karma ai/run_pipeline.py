@@ -73,6 +73,18 @@ try:
 except ImportError:
     _HAS_SELECT = False
 
+try:
+    from agents.nodes.node3_selector import ThresholdCache
+    from agents.nodes.node3_refinement import (
+        MAX_REFINEMENT_ROUNDS,
+        dispatch_refinement,
+        parse_refinement_request,
+    )
+    from agents.llm.client import StructuredCallError
+    _HAS_REFINE = True
+except ImportError:
+    _HAS_REFINE = False
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -531,8 +543,114 @@ def run_selection(state: PipelineState) -> PipelineState:
     print()
     print(format_build_card(build_card, brief))
 
-    state = {**state, "build_card": build_card, "current_node": "done"}
+    state = {**state, "build_card": build_card, "current_node": "refinement"}
     return state
+
+
+def _print_build_diff(build_card: BuildCard) -> None:
+    """Print only the slots that changed this refinement round, plus the new total."""
+    if not build_card.changed_slots:
+        print("  No changes to the build.")
+        return
+    print("\n  Changes this round:")
+    for c in build_card.changed_slots:
+        old = c.get("old_product_id") or "—"
+        new = c.get("new_product_id") or "—"
+        reason = c.get("reason") or ""
+        print(f"    {c['slot']:<12} {old:>14}  ->  {new:<14}  ({reason})")
+    print(f"  New total: {_inr(build_card.total_price_inr)}\n")
+
+
+def run_refinement(state: PipelineState) -> PipelineState:
+    """PHASE 5 — interactive refinement loop.
+
+    Owns the input()/print() loop; all logic lives in pure functions in
+    agents/nodes/node3_refinement.py (dispatch_refinement / diff_and_bias). The
+    loop-scope `locked_parts` dict (slot_name -> product_id) is threaded through
+    dispatch and persisted back into PipelineState["locked_parts"] on exit.
+    restart re-enters the graph from inside dispatch via graph_runner, never a
+    graph edge — graph.py topology is unchanged.
+    """
+    _print_header("PHASE 5  -  REFINEMENT")
+
+    brief = state.get("current_brief")
+    bands = state.get("price_bands")
+    build_card = state.get("build_card")
+
+    if not _HAS_REFINE:
+        print("  [STUB] refinement not available  -  skipping refinement loop.")
+        return {**state, "locked_parts": {}, "current_node": "done"}
+    if brief is None or bands is None or build_card is None or not build_card.parts:
+        print("  No parts to refine  -  skipping refinement loop.")
+        return {**state, "locked_parts": {}, "current_node": "done"}
+
+    locked_parts: dict[str, str] = {}
+    cache = ThresholdCache()
+    round_count = 0
+
+    print("\n  You can refine the build below. Try: 'pin gpu', 'reject the psu',")
+    print("  'set budget to 90k', 'target 1440p', or 'accept' to finalize.")
+
+    while round_count < MAX_REFINEMENT_ROUNDS:
+        try:
+            user_msg = input(
+                f"\n  Refine [{round_count + 1}/{MAX_REFINEMENT_ROUNDS}] "
+                f"(or 'accept'): "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  [Interrupted]  -  keeping the current build.")
+            break
+
+        if not user_msg:
+            print("  (Empty input  -  type 'accept' to finish, or describe a change.)")
+            continue
+
+        try:
+            ops = parse_refinement_request(user_msg, brief, build_card)
+        except StructuredCallError as exc:
+            print(f"  [WARNING] Could not parse that request: {exc}")
+            continue
+
+        try:
+            result = dispatch_refinement(ops, brief, bands, build_card, locked_parts, cache)
+        except Exception as exc:  # noqa: BLE001 — a bad round must not kill the session
+            print(f"  [WARNING] Refinement step failed ({type(exc).__name__}: {exc}).")
+            round_count += 1
+            continue
+
+        brief = result.brief
+        bands = result.price_bands
+        if result.message:
+            print(f"  {result.message}")
+
+        if result.accepted:
+            print(f"\n  Build accepted  -  shipping {len(result.product_ids)} product IDs to backend:")
+            print("    " + ", ".join(result.product_ids))
+            build_card = result.build_card
+            break
+
+        prev_card = build_card
+        build_card = result.build_card
+        if build_card is not prev_card:
+            if build_card.changed_slots:
+                _print_build_diff(build_card)
+            else:
+                # A restart (or an unchanged re-solve) returns a fresh card — show it in full.
+                print()
+                print(format_build_card(build_card, brief))
+
+        round_count += 1
+    else:
+        print(f"\n  Maximum refinement rounds ({MAX_REFINEMENT_ROUNDS}) reached.")
+
+    return {
+        **state,
+        "current_brief": brief,
+        "price_bands": bands,
+        "build_card": build_card,
+        "locked_parts": dict(locked_parts),
+        "current_node": "done",
+    }
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -605,6 +723,7 @@ def main() -> None:
     state = run_feasibility(state)
     state = run_allocation(state)
     state = run_selection(state)
+    state = run_refinement(state)
 
     verdict = state.get("feasibility_verdict")
     bands   = state.get("price_bands")
