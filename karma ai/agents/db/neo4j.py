@@ -1,9 +1,14 @@
 import os
 from typing import Optional
 
+from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
 from agents.schemas.slots import ComponentSlot
+
+# Load .env so a standalone import has NEO4J_* available. Idempotent: only fills
+# vars that are not already set in the process environment.
+load_dotenv()
 
 _driver = None
 
