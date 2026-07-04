@@ -131,6 +131,21 @@ def _floor_filter(
     return slot_requirement_filter(slot, parts, req, brief, enforce_brand=False)
 
 
+def _reject_filter(parts: list[dict], brief: UserBuildBrief) -> list[dict]:
+    """Drop parts the user has explicitly rejected in a prior refinement round.
+
+    brief.hard_constraints.rejected_parts carries no slot field, but product_id
+    is the catalog's PRIMARY KEY and 1:1 with a single category/slot (see
+    data/catalog/seed.sql) — a product_id is never shared across slots. So a
+    flat product_id exclusion set is inherently slot-scoped: a rejected GPU
+    product_id can never match a RAM or any other slot's candidate.
+    """
+    rejected_ids = {r.product_id for r in brief.hard_constraints.rejected_parts}
+    if not rejected_ids:
+        return parts
+    return [p for p in parts if p.get("product_id") not in rejected_ids]
+
+
 def _fetch_floor(
     pg: PostgresClient,
     slot: ComponentSlot,
@@ -146,9 +161,12 @@ def _fetch_floor(
     this function, so it can never reach the shortlist or the LLM pick. Every
     catalog fetch in the selection funnel (band, widened band, DDR4 pull, and
     both full-catalog escalations) routes through here, so the escalation ladder
-    relaxes only the price band — never the floor.
+    relaxes only the price band — never the floor. Rejected parts (from a prior
+    refinement 'swap') are dropped at the same choke point, so a rejected
+    product_id can never re-enter the shortlist for any slot on a later pass.
     """
     parts = pg.get_parts_in_band(slot, low, high, in_stock=True)
+    parts = _reject_filter(parts, brief)
     return _floor_filter(slot, parts, req, brief)
 
 
