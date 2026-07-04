@@ -12,6 +12,8 @@ from ..nodes.node2_allocation import allocate_budget
 from ..feasibility.resolver import resolve_requirements
 from ..nodes.node3_selector import (
     SELECTION_ORDER,
+    ThresholdCache,
+    _threshold_key,
     derive_fitness_thresholds,
     select_build,
     select_part,
@@ -70,8 +72,18 @@ def _select_build_with_pins(
     brief: UserBuildBrief,
     price_bands: PriceBands,
     pinned_parts: dict[ComponentSlot, BuildCardPart],
+    cache: ThresholdCache | None = None,
 ) -> BuildCard:
-    fitness_thresholds = derive_fitness_thresholds(brief)
+    if cache is None:
+        cache = ThresholdCache()
+    current_key = _threshold_key(brief)
+    if cache.thresholds is not None and cache.key == current_key:
+        fitness_thresholds = cache.thresholds
+        logger.info("[Node3] reusing cached fitness thresholds (brief unchanged)")
+    else:
+        fitness_thresholds = derive_fitness_thresholds(brief)
+        cache.thresholds = fitness_thresholds
+        cache.key = current_key
     neo4j_available = Neo4jClient().ping()
     req = resolve_requirements(brief)
     locked_parts: dict[ComponentSlot, str] = {}
@@ -113,31 +125,32 @@ def apply_refinement(
     build_card: BuildCard,
     brief: UserBuildBrief,
     price_bands: PriceBands,
+    cache: ThresholdCache | None = None,
 ) -> BuildCard | None:
     if request.action in ("accept", "restart"):
         return None
 
     if request.action == "open":
-        return select_build(brief, price_bands)
+        return select_build(brief, price_bands, cache=cache)
 
     if request.action == "pin":
         if request.slot is None:
             logger.warning("pin action received with no slot; falling back to full re-run")
-            return select_build(brief, price_bands)
+            return select_build(brief, price_bands, cache=cache)
         part = next((p for p in build_card.parts if p.slot == request.slot), None)
         if part is None:
             logger.warning("Pinned slot %s not in current build; falling back to full re-run", request.slot)
-            return select_build(brief, price_bands)
-        return _select_build_with_pins(brief, price_bands, {request.slot: part})
+            return select_build(brief, price_bands, cache=cache)
+        return _select_build_with_pins(brief, price_bands, {request.slot: part}, cache=cache)
 
     if request.action == "swap":
         if request.slot is None:
             logger.warning("swap action received with no slot; falling back to full re-run")
-            return select_build(brief, price_bands)
+            return select_build(brief, price_bands, cache=cache)
         current_part = next((p for p in build_card.parts if p.slot == request.slot), None)
         if current_part is None:
             logger.warning("Swap slot %s not in current build; falling back to full re-run", request.slot)
-            return select_build(brief, price_bands)
+            return select_build(brief, price_bands, cache=cache)
         brief.hard_constraints.rejected_parts.append(
             RejectedPart(
                 product_id=current_part.product_id,
@@ -148,7 +161,7 @@ def apply_refinement(
         pinned_parts = {
             p.slot: p for p in build_card.parts if p.slot != request.slot
         }
-        return _select_build_with_pins(brief, price_bands, pinned_parts)
+        return _select_build_with_pins(brief, price_bands, pinned_parts, cache=cache)
 
     logger.warning("Unknown refinement action: %s", request.action)
     return build_card
@@ -174,6 +187,7 @@ def refinement_loop(
     build_card: BuildCard,
     brief: UserBuildBrief,
     price_bands: PriceBands,
+    cache: ThresholdCache | None = None,
 ) -> BuildCard:
     for round_num in range(MAX_REFINEMENT_ROUNDS):
         _print_build_card(build_card)
@@ -192,7 +206,7 @@ def refinement_loop(
             price_bands = allocate_budget(brief)
             logger.info("Budget updated to ₹%s; re-allocated price bands", request.new_budget)
 
-        result = apply_refinement(request, build_card, brief, price_bands)
+        result = apply_refinement(request, build_card, brief, price_bands, cache=cache)
 
         if result is None:
             if request.action == "accept":

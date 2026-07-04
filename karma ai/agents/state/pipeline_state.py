@@ -18,7 +18,8 @@ class PipelineState(TypedDict, total=False):
     build_card: BuildCard
     locked_parts: dict[str, str] | None          # slot name → product_id
     remaining_budget: int | None
-    fitness_thresholds: dict[str, float] | None  # slot name → threshold
+    fitness_thresholds: dict[str, float] | None      # slot name → threshold
+    fitness_thresholds_key: dict | None              # cache key used to derive fitness_thresholds
     error_message: str | None                    # for routing failures
     current_node: str | None
 

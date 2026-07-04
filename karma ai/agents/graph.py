@@ -40,7 +40,7 @@ except ImportError:
     _HAS_ALLOC = False
 
 try:
-    from agents.nodes.node3_selector import select_build
+    from agents.nodes.node3_selector import ThresholdCache, select_build
     _HAS_SELECT = True
 except ImportError:
     _HAS_SELECT = False
@@ -159,10 +159,13 @@ def node_select(state: PipelineState) -> PipelineState:
     brief = state.get("current_brief")
     bands = state.get("price_bands")
     verdict = state.get("feasibility_verdict")
-    build_card = select_build(brief, bands, feasibility_verdict=verdict)
+    cache = ThresholdCache()
+    build_card = select_build(brief, bands, feasibility_verdict=verdict, cache=cache)
 
     return {  # type: ignore[return-value]
         "build_card": build_card,
+        "fitness_thresholds": {s.value: v for s, v in (cache.thresholds or {}).items()},
+        "fitness_thresholds_key": cache.key,
         "current_node": "done",
     }
 

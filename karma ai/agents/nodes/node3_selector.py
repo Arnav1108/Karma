@@ -254,6 +254,37 @@ def _over_budget_message(
     )
 
 
+# ── Fitness threshold cache ───────────────────────────────────────────────────
+
+@dataclass
+class ThresholdCache:
+    """Mutable cache for derive_fitness_thresholds results.
+
+    Create once at the start of a build session and thread through select_build
+    and _select_build_with_pins so refinement restarts reuse the derived
+    thresholds when the brief's use-case fields haven't changed.
+    """
+    thresholds: dict[ComponentSlot, float] | None = None
+    key: dict | None = None
+
+
+def _threshold_key(brief: UserBuildBrief) -> dict:
+    """Cache key for derive_fitness_thresholds — exactly the seven brief fields it reads."""
+    return {
+        "primary_use_case": brief.purpose.primary_use_case,
+        "sub_case": brief.purpose.sub_case,
+        "secondary_use_cases": sorted(
+            (s.use_case, s.weight) for s in brief.purpose.secondary_use_cases
+        ),
+        "software": sorted(
+            (s.name, s.category, s.intensity) for s in brief.software
+        ),
+        "target_resolution": brief.performance.target_resolution,
+        "target_framerate": brief.performance.target_framerate,
+        "upgrade_path": brief.longevity.upgrade_path,
+    }
+
+
 # ── Fitness threshold derivation ──────────────────────────────────────────────
 
 def derive_fitness_thresholds(brief: UserBuildBrief) -> dict[ComponentSlot, float]:
@@ -527,6 +558,7 @@ def select_build(
     brief: UserBuildBrief,
     price_bands: PriceBands,
     feasibility_verdict: FeasibilityVerdict | None = None,
+    cache: ThresholdCache | None = None,
 ) -> BuildCard:
     """Walk SELECTION_ORDER and fill each slot via the three-step funnel.
 
@@ -564,7 +596,16 @@ def select_build(
             "DISABLED (no in-stock DDR4 kit meets the resolved RAM floor)",
         )
 
-    fitness_thresholds = derive_fitness_thresholds(brief)
+    if cache is None:
+        cache = ThresholdCache()
+    current_key = _threshold_key(brief)
+    if cache.thresholds is not None and cache.key == current_key:
+        fitness_thresholds = cache.thresholds
+        logger.info("[Node3] reusing cached fitness thresholds (brief unchanged)")
+    else:
+        fitness_thresholds = derive_fitness_thresholds(brief)
+        cache.thresholds = fitness_thresholds
+        cache.key = current_key
     logger.info(
         "[Node3] fitness thresholds: %s",
         {s.value: round(t, 2) for s, t in fitness_thresholds.items()},
