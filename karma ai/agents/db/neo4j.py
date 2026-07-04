@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Optional
 
@@ -5,6 +6,8 @@ from dotenv import load_dotenv
 from neo4j import GraphDatabase
 
 from agents.schemas.slots import ComponentSlot
+
+logger = logging.getLogger(__name__)
 
 # Load .env so a standalone import has NEO4J_* available. Idempotent: only fills
 # vars that are not already set in the process environment.
@@ -51,19 +54,71 @@ WITH candidate_exists, locked_exists, count(spec) AS shared_specs
 RETURN candidate_exists, locked_exists, shared_specs > 0 AS compatible
 """
 
-# Fitness edge lookup — OPTIONAL so components with no GOOD_FOR edge return weight=null.
+# Fitness edge lookup — OPTIONAL so components with no GOOD_FOR edge return tier/score=null.
+# tier/score are written by data/graph/seed_fitness_benchmarks.py (benchmark-derived),
+# superseding the old stub r.weight from seed_graph.py's _GOOD_FOR_WEIGHTS table.
 _FITNESS_QUERY = """
 OPTIONAL MATCH (c:Component {product_id: $product_id})-[r:GOOD_FOR]->(u:UseCase {name: $use_case})
-RETURN r.weight AS weight
+RETURN r.tier AS tier, r.score AS score
 LIMIT 1
 """
 
 # Strict fitness lookup — returns nothing if no edge exists.
 _FITNESS_SINGLE_QUERY = """
 MATCH (c:Component {product_id: $product_id})-[r:GOOD_FOR]->(u:UseCase {name: $use_case})
-RETURN r.weight AS weight
+RETURN r.tier AS tier, r.score AS score
 LIMIT 1
 """
+
+# Number of quintile buckets score_to_tier() (data/graph/seed_fitness_benchmarks.py)
+# cuts [0.0, 1.0] scores into. required_tier() below must use the same cut points so
+# a threshold of 0.8 means exactly "tier 4 or nothing," not an approximation of it.
+_TIER_COUNT = 5
+
+# Empirically (phase4/fitness-query-migration: 63 live derive_fitness_thresholds
+# samples across all 7 fixtures), real LLM thresholds land on 0.05 increments —
+# either mid-bucket or exactly on a cut point — never within this margin below a
+# boundary. That pattern isn't guaranteed, so a threshold that does land here is
+# logged loudly rather than silently truncated a tier low.
+_TIER_BOUNDARY_WARN_MARGIN = 0.01
+
+
+def _required_tier(fitness_threshold: float) -> int:
+    """Convert a continuous fitness_threshold (0.0-1.0) into the tier ordinal
+    (0-4) that GOOD_FOR.tier buckets components into.
+
+    Raises ValueError for out-of-range input (fail loud on a contract violation).
+    Degrades safely — logs a warning but still returns the floored tier — when
+    the threshold sits within _TIER_BOUNDARY_WARN_MARGIN of a cut point, since
+    that pattern has never been observed in practice and could indicate the
+    LLM threshold and the tier scale have drifted apart.
+    """
+    if not isinstance(fitness_threshold, (int, float)) or not 0.0 <= fitness_threshold <= 1.0:
+        raise ValueError(
+            f"fitness_threshold must be a float in [0.0, 1.0], got {fitness_threshold!r}"
+        )
+
+    raw = fitness_threshold * _TIER_COUNT
+    tier = min(_TIER_COUNT - 1, int(raw))
+
+    # Margin is compared in original threshold units (0.0-1.0), not raw (threshold*5)
+    # units — comparing in raw space would make the margin 5x tighter than intended.
+    # The 1e-9 fudge absorbs float noise (e.g. 0.8 - 0.79 lands on 0.010000000000000009,
+    # not 0.01) so it doesn't defeat the margin check it's meant to satisfy.
+    next_boundary_tier = tier + 1
+    if next_boundary_tier <= _TIER_COUNT:
+        next_boundary_threshold = next_boundary_tier / _TIER_COUNT
+        gap = next_boundary_threshold - fitness_threshold
+        if gap <= _TIER_BOUNDARY_WARN_MARGIN + 1e-9:
+            logger.warning(
+                "[Neo4j] fitness_threshold %.4f is within %.4f of tier boundary %d "
+                "(threshold %.2f) but truncates to tier %d — outside the observed "
+                "0.05-increment pattern from derive_fitness_thresholds; verify this "
+                "threshold was intentional.",
+                fitness_threshold, gap, next_boundary_tier, next_boundary_threshold, tier,
+            )
+
+    return tier
 
 # Maps (candidate_slot, locked_slot) → Cypher that checks their shared-spec constraint.
 # Slot pairs absent from this map have no compatibility rule and pass through unchanged.
@@ -179,31 +234,38 @@ class Neo4jClient:
         fitness_threshold: float,
     ) -> list[str]:
         """
-        Return candidates whose GOOD_FOR edge weight meets fitness_threshold.
+        Return candidates whose GOOD_FOR edge tier meets fitness_threshold.
+
+        fitness_threshold is a continuous 0.0-1.0 value (from derive_fitness_thresholds);
+        it's converted once via _required_tier() into the coarse 0-4 ordinal that
+        GOOD_FOR.tier uses, then candidates are filtered on tier and ranked within
+        the passing shortlist by the continuous GOOD_FOR.score tie-break.
 
         Components with no GOOD_FOR edge for use_case are included by default
         (fail open) — sparse graph coverage must not exclude valid candidates.
-        Results are ordered: weighted passes (highest first) then unweighted.
+        Results are ordered: tier passes (highest score first) then unranked fail-opens.
 
         Args:
             candidate_product_ids: Product IDs to filter.
             use_case: Target use-case name matching UseCase.name in the graph.
-            fitness_threshold: Minimum GOOD_FOR weight in [0.0, 1.0].
-                               0.0 returns all candidates that have an edge, plus unweighted.
+            fitness_threshold: Minimum fitness in [0.0, 1.0], mapped to a required tier.
+                               0.0 returns all candidates that have an edge, plus unranked.
 
         Returns:
-            Filtered list: weighted passes descending, then unweighted fall-opens.
+            Filtered list: tier passes ranked by score descending, then unranked fall-opens.
         """
         if not candidate_product_ids:
             return []
+
+        required_tier = _required_tier(fitness_threshold)
 
         try:
             driver = _get_driver()
         except Exception:
             return list(candidate_product_ids)
 
-        weighted: list[tuple[str, float]] = []
-        unweighted: list[str] = []
+        ranked: list[tuple[str, float]] = []
+        unranked: list[str] = []
 
         with driver.session() as session:
             for product_id in candidate_product_ids:
@@ -212,16 +274,16 @@ class Neo4jClient:
                     product_id=product_id,
                     use_case=use_case,
                 ).single()
-                weight = record["weight"] if record is not None else None
-                if weight is None:
+                tier = record["tier"] if record is not None else None
+                if tier is None:
                     # Component absent from graph or has no GOOD_FOR edge → fail open.
-                    unweighted.append(product_id)
-                elif float(weight) >= fitness_threshold:
-                    weighted.append((product_id, float(weight)))
-                # weight < threshold → excluded
+                    unranked.append(product_id)
+                elif int(tier) >= required_tier:
+                    ranked.append((product_id, float(record["score"])))
+                # tier < required_tier → excluded
 
-        weighted.sort(key=lambda x: x[1], reverse=True)
-        return [pid for pid, _ in weighted] + unweighted
+        ranked.sort(key=lambda x: x[1], reverse=True)
+        return [pid for pid, _ in ranked] + unranked
 
     def get_component_fitness(
         self,
@@ -229,14 +291,17 @@ class Neo4jClient:
         use_case: str,
     ) -> Optional[float]:
         """
-        Return the GOOD_FOR edge weight between a component and a use case.
+        Return the GOOD_FOR edge score between a component and a use case.
+
+        Returns the continuous score (not the coarse tier) since this is the
+        finer-grained value external callers would want.
 
         Args:
             product_id: Component's product ID.
             use_case: Target use-case name matching UseCase.name in the graph.
 
         Returns:
-            Edge weight as float, or None if no edge exists or component is absent.
+            Edge score as float, or None if no edge exists or component is absent.
         """
         try:
             driver = _get_driver()
@@ -246,8 +311,8 @@ class Neo4jClient:
                     product_id=product_id,
                     use_case=use_case,
                 ).single()
-                if record is None or record["weight"] is None:
+                if record is None or record["score"] is None:
                     return None
-                return float(record["weight"])
+                return float(record["score"])
         except Exception:
             return None
