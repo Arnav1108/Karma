@@ -1,12 +1,13 @@
 """
 run_pipeline.py  -  CLI harness for Karma AI Phase 1 pipeline.
 
-Wires three stages end to end:
+Wires four stages end to end:
   PHASE 1  Intake        -  conversational Q&A -> UserBuildBrief
   PHASE 2  Feasibility   -  rough gate (comfortable / tight / impossible)
   PHASE 3  Allocation    -  price bands per component
+  PHASE 4  Selection     -  part finder funnel -> build card
 
-Three modules may not be merged yet; this harness imports them defensively
+Modules may not be merged yet; this harness imports them defensively
 and falls back to clearly-labelled stubs so the pipeline runs skeletally now.
 Stubs drop out automatically once the real modules land.
 
@@ -31,7 +32,9 @@ from agents.schemas import (  # noqa: E402
     FeasibilityVerdict,
     UserBuildBrief,
 )
+from agents.schemas.build_card import BuildCard  # noqa: E402
 from agents.schemas.price_bands import PriceBand, PriceBands  # noqa: E402
+from agents.output.formatter import format_build_card  # noqa: E402
 from agents.state.pipeline_state import PipelineState, new_state  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -63,6 +66,12 @@ try:
     _HAS_ALLOC = True
 except ImportError:
     _HAS_ALLOC = False
+
+try:
+    from agents.nodes.node3_selector import select_build
+    _HAS_SELECT = True
+except ImportError:
+    _HAS_SELECT = False
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -164,6 +173,17 @@ def _stub_allocate(brief: UserBuildBrief) -> PriceBands:
     }
     return PriceBands(root=bands)
 
+
+def _stub_select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
+    # TODO: Remove when agents/nodes/node3_selector.py merges.
+    # EXPECTED INTERFACE:
+    #   select_build(brief, price_bands, feasibility_verdict=None, cache=None) -> BuildCard
+    #   Three-step funnel per slot (Postgres catalog -> Neo4j graph filter -> LLM
+    #   pick), walked in SELECTION_ORDER. Returns a BuildCard with parts, total
+    #   price, summary, and any dead-end warnings.
+    print("  [STUB] select_build not available  -  returning empty build card.")
+    return BuildCard(parts=[], total_price_inr=0, summary="[STUB] no parts selected", warnings=[])
+
 # ---------------------------------------------------------------------------
 # Display helpers
 # ---------------------------------------------------------------------------
@@ -184,6 +204,7 @@ def _print_module_status() -> None:
     print(f"\n  node1_intake      {tag(_HAS_NODE1)}")
     print(f"  estimate          {tag(_HAS_ESTIMATE)}")
     print(f"  node2_allocation  {tag(_HAS_ALLOC)}")
+    print(f"  node3_selector    {tag(_HAS_SELECT)}")
 
 
 def _load_fixture_brief(path: Path) -> UserBuildBrief:
@@ -483,7 +504,34 @@ def run_allocation(state: PipelineState) -> PipelineState:
         print(f"  Bands total_mid        : {_inr(bands.total_mid())}")
         print(f"  Bands total_high       : {_inr(bands.total_high())}")
 
-    state = {**state, "price_bands": bands, "current_node": "done"}
+    state = {**state, "price_bands": bands, "current_node": "node3"}
+    return state
+
+
+def run_selection(state: PipelineState) -> PipelineState:
+    _print_header("PHASE 4  -  PART SELECTION")
+
+    brief = state.get("current_brief")
+    bands = state.get("price_bands")
+    verdict = state.get("feasibility_verdict")
+    if brief is None or bands is None:
+        print("  [ERROR] No brief/price bands in state  -  cannot select parts.")
+        sys.exit(1)
+
+    if _HAS_SELECT:
+        try:
+            build_card = select_build(brief, bands, feasibility_verdict=verdict)
+        except Exception as exc:
+            print(f"  [WARNING] select_build raised {type(exc).__name__}: {exc}")
+            print("  [FALLBACK] Using stub build card.")
+            build_card = _stub_select_build(brief, bands)
+    else:
+        build_card = _stub_select_build(brief, bands)
+
+    print()
+    print(format_build_card(build_card, brief))
+
+    state = {**state, "build_card": build_card, "current_node": "done"}
     return state
 
 # ---------------------------------------------------------------------------
@@ -556,15 +604,21 @@ def main() -> None:
 
     state = run_feasibility(state)
     state = run_allocation(state)
+    state = run_selection(state)
 
     verdict = state.get("feasibility_verdict")
     bands   = state.get("price_bands")
+    build_card = state.get("build_card")
     band_count = len(bands.root) if bands else 0
+    parts_count = len(build_card.parts) if build_card else 0
     verdict_label = verdict.verdict if verdict else "n/a"
 
     print(f"\n{_SEP}")
     print("  PIPELINE COMPLETE")
-    print(f"  Feasibility: {verdict_label}  |  Price bands: {band_count} slots")
+    print(
+        f"  Feasibility: {verdict_label}  |  Price bands: {band_count} slots  |  "
+        f"Build: {parts_count}/{band_count} slots filled"
+    )
     print(_SEP + "\n")
 
 
