@@ -126,7 +126,12 @@ flowchart LR
 - All slots re-solve on each refinement; the compatibility validator surfaces conflicts conversationally rather than maintaining a dependency graph.
 - Budget-level changes are routed through the budget updater (re-run `allocate_budget` with the new budget, then re-solve).
 - Brief-level changes restart at Node One.
-- **As built (`node3_refinement.py`):** a freeform user message is parsed via `call_structured` into a `RefinementRequest` (`action`, `slot`, `reason`, `new_budget`) with five actions — `pin` (lock one slot, re-solve the rest), `open` (unlock one slot, full re-solve), `swap` (append current part to `rejected_parts`, re-pick that slot), `accept` (finalize), `restart` (back to Node One). `MAX_REFINEMENT_ROUNDS = 5`.
+- **As built (`node3_refinement.py`):** the conversation loop lives in `run_pipeline.py` (Phase 5, `run_refinement`); the module itself is pure and non-interactive. A freeform user message is parsed via `call_structured` into a `RefinementOps` — a **multi-op** classification (not a single action): `brief_edit`, `restart_trigger`, `budget_change`, `pin`, `reject`, `accept` may all populate in one turn (e.g. "bump budget to 90k and give me an nvidia card" → `budget_change` + `reject`).
+  - **Field routing** (`route_field_edit`) is a fixed, hardcoded table — never an LLM judgment call: `software` / `performance` / `extras` / `physical` / `longevity` → **additive** (`brief_edit`); `primary_use_case` / `budget.scope` / `existing.reuse_parts` → **structural** (`restart_trigger`). A field outside the table defaults to additive with a logged warning, never a crash. The table decides routing even if the LLM puts a structural field name in `brief_edit` (or vice versa).
+  - **List-valued additive fields merge, not replace:** `software` is upserted by name (`_merge_list_field`) rather than overwritten wholesale, since the LLM classifying one turn only sees that turn's message — asking it to echo the full existing list back would risk silently dropping entries it didn't mention.
+  - **Dispatch precedence**, fixed per turn: `restart_trigger → brief_edit → budget_change → pin/reject → re-solve → accept`. `restart_trigger` patches the brief and calls `graph_runner.run_from_brief`, skipping every other op that turn; `locked_parts` and `rejected_parts` persist across it. `brief_edit` patches the brief and re-runs `estimate_feasibility` only (not full Node One) — an `impossible` verdict skips the re-solve. `budget_change` rescales `comfortable_min/max` proportionally, sets the new ceiling, and re-runs `allocate_budget`. `pin` records `locked_parts[slot] = product_id`; `reject` appends a `RejectedPart` and unpins that slot if it was pinned. Any of the above triggers one incumbent-biased re-solve (`_select_build_with_pins` + `diff_and_bias`); `accept` (only reachable if nothing else fired) ships `build_card.product_ids`.
+  - **`diff_and_bias`** reconciles a fresh re-solve against the prior card: for each non-pinned slot whose pick changed, it keeps the OLD part if still valid (in the widened price band, not rejected, compatible with parts decided so far) — otherwise the new pick wins. Only genuine changes land in `BuildCard.changed_slots` (`{slot, old_product_id, new_product_id, reason}`), so the harness prints a diff instead of a full card each round.
+  - `MAX_REFINEMENT_ROUNDS = 5`.
 
 ---
 
@@ -468,7 +473,7 @@ karma ai/
 │   │   ├── node1_intake.py         # blank_brief, floor_met, next_question, extract_turn, ...
 │   │   ├── node2_allocation.py     # allocate_budget; _distribute / _compute_bands (largest-remainder)
 │   │   ├── node3_selector.py       # derive_fitness_thresholds, select_part, select_build, SELECTION_ORDER
-│   │   └── node3_refinement.py     # RefinementRequest, parse/apply_refinement, refinement_loop
+│   │   └── node3_refinement.py     # RefinementOps, route_field_edit, dispatch_refinement, diff_and_bias
 │   ├── feasibility/
 │   │   ├── resolver.py             # resolve_requirements + aggregate_scope (deterministic)
 │   │   └── estimate.py             # estimate_feasibility (LLM + live Postgres price anchor)
@@ -482,7 +487,8 @@ karma ai/
 │   ├── fixtures/                   # budget_gamer / video_editor / ml_workstation (valid Briefs)
 │   └── graph/seed_graph.py         # seeds Neo4j from the Postgres catalog (idempotent MERGE)
 ├── scripts/test_db_connection.py   # self-service Supabase connection + catalog verifier
-└── tests/                          # conftest.py + test_pipeline_integration.py (pytest)
+└── tests/                          # conftest.py + test_pipeline_integration.py + test_node3_selector.py
+                                     #   + test_graph_node_select.py + test_node3_refinement.py (pytest)
 ```
 
 **Git workflow:** feature branches `phase{N}/feature-name`, conventional commits, PRs merged to `main`. Always stage with specific paths (`git add "karma ai/agents/..."`), never `git add .` — the repo root accumulates Node/`__pycache__`/stray files that `.gitignore` now covers. Always merge with `git merge <branch> -m "..."` to avoid the editor opening.
