@@ -1,0 +1,329 @@
+"""Unit coverage for the Node 3 refinement loop (pure, non-interactive layer).
+
+Covers exactly what task §Testing asks for:
+  1. Field routing table dispatch — additive vs structural, plus the
+     "unknown field defaults to additive with a warning" case.
+  2. pin / reject / locked_parts round-trip through dispatch_refinement.
+  3. diff_and_bias incumbent-bias: keep the old part when it's still valid,
+     keep the new pick when the old part is out of band / rejected.
+
+All tests are OFFLINE: every live Postgres/Neo4j/LLM call reached by
+dispatch_refinement is monkeypatched, and diff_and_bias is driven with
+neo4j_available passed explicitly so it never pings. No db_available skip is
+needed here because nothing hits a live service; the DB-dependent tests live in
+test_node3_selector.py / test_pipeline_integration.py and keep their skips.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import agents.nodes.node3_refinement as refine
+from agents.nodes.node3_refinement import (
+    RefinementOps,
+    RefinementResult,
+    apply_reject,
+    diff_and_bias,
+    dispatch_refinement,
+    patch_brief_field,
+    rescale_budget,
+    route_field_edit,
+)
+from agents.schemas.build_card import BuildCard, BuildCardPart
+from agents.schemas.price_bands import PriceBand, PriceBands
+from agents.schemas.slots import ComponentSlot
+
+
+# ── Builders ──────────────────────────────────────────────────────────────────
+
+def _part(slot: ComponentSlot, pid: str, price: int) -> BuildCardPart:
+    return BuildCardPart(
+        slot=slot, product_id=pid, name=f"{slot.value} {pid}",
+        price_inr=price, justification="test",
+    )
+
+
+def _card(parts: list[BuildCardPart]) -> BuildCard:
+    return BuildCard(
+        parts=parts, total_price_inr=sum(p.price_inr for p in parts), summary="test",
+    )
+
+
+def _bands(**slot_price_ranges: tuple[int, int, int]) -> PriceBands:
+    root = {
+        ComponentSlot(s): PriceBand(low=lo, mid=mid, high=hi)
+        for s, (lo, mid, hi) in slot_price_ranges.items()
+    }
+    return PriceBands(root=root)
+
+
+_STUB_CARD = _card([_part(ComponentSlot.gpu, "RESOLVED-GPU", 24000)])
+
+
+# ── 1. Field routing table ────────────────────────────────────────────────────
+
+def test_route_additive_fields():
+    for f in ("software", "performance", "extras", "physical", "longevity"):
+        assert route_field_edit(f) == "additive", f
+
+def test_route_structural_fields():
+    for f in ("primary_use_case", "budget.scope", "existing.reuse_parts"):
+        assert route_field_edit(f) == "structural", f
+
+def test_route_unknown_field_defaults_additive_with_warning(caplog):
+    with caplog.at_level(logging.WARNING, logger="agents.nodes.node3_refinement"):
+        assert route_field_edit("made_up_field") == "additive"
+    assert any("made_up_field" in r.message for r in caplog.records), (
+        "expected a warning naming the unknown field"
+    )
+
+
+# ── 1b. Routing drives dispatch (additive vs structural) ──────────────────────
+
+def test_dispatch_structural_edit_restarts_and_skips_other_ops(monkeypatch, budget_gamer_brief):
+    """A structural field edit restarts via run_from_brief and skips pin/accept."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    calls = {"restart": 0, "resolve": 0}
+
+    restarted_card = _card([_part(ComponentSlot.gpu, "RESTARTED-GPU", 30000)])
+
+    def fake_run_from_brief(b, bands):
+        calls["restart"] += 1
+        return {"build_card": restarted_card, "current_brief": b, "price_bands": bands}
+
+    monkeypatch.setattr("agents.graph_runner.run_from_brief", fake_run_from_brief)
+    monkeypatch.setattr(refine, "allocate_budget", lambda b: _bands(gpu=(20000, 25000, 30000)))
+    monkeypatch.setattr(refine, "_select_build_with_pins",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not re-solve")))
+
+    ops = RefinementOps(
+        restart_trigger={"field": "primary_use_case", "value": "content_creation"},
+        pin=ComponentSlot.gpu,   # must be skipped
+        accept=True,             # must be skipped
+    )
+    locked: dict[str, str] = {}
+    result = dispatch_refinement(ops, brief, _bands(gpu=(20000, 25000, 30000)),
+                                 _STUB_CARD, locked)
+
+    assert calls["restart"] == 1
+    assert result.build_card is restarted_card
+    assert not result.accepted, "accept must be skipped when a structural edit fires"
+    assert locked == {}, "pin must be skipped when a structural edit fires"
+
+
+def test_dispatch_misrouted_structural_in_brief_edit_still_restarts(monkeypatch, budget_gamer_brief):
+    """primary_use_case arriving in brief_edit is re-routed to structural by the table."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    hits = {"restart": 0}
+    monkeypatch.setattr("agents.graph_runner.run_from_brief",
+                        lambda b, bands: (hits.__setitem__("restart", hits["restart"] + 1)
+                                          or {"build_card": _STUB_CARD}))
+    monkeypatch.setattr(refine, "allocate_budget", lambda b: _bands(gpu=(20000, 25000, 30000)))
+
+    ops = RefinementOps(brief_edit={"field": "primary_use_case", "value": "work_productivity"})
+    dispatch_refinement(ops, brief, _bands(gpu=(20000, 25000, 30000)), _STUB_CARD, {})
+    assert hits["restart"] == 1
+
+
+def test_dispatch_additive_edit_rechecks_feasibility_then_resolves(monkeypatch, budget_gamer_brief):
+    """An additive edit runs feasibility (not a restart) and re-solves."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    seen = {"feasibility": 0, "resolve": 0}
+
+    class _V:  # minimal verdict stand-in
+        verdict = "comfortable"
+
+    monkeypatch.setattr(refine, "estimate_feasibility",
+                        lambda b: seen.__setitem__("feasibility", 1) or _V())
+    monkeypatch.setattr(refine, "_select_build_with_pins",
+                        lambda *a, **k: seen.__setitem__("resolve", 1) or _STUB_CARD)
+    monkeypatch.setattr(refine, "diff_and_bias", lambda old, new, *a, **k: new)
+    monkeypatch.setattr("agents.graph_runner.run_from_brief",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not restart")))
+
+    ops = RefinementOps(brief_edit={"field": "longevity",
+                                    "value": {"upgrade_path": "future_proof"}})
+    result = dispatch_refinement(ops, brief, _bands(gpu=(20000, 25000, 30000)), _STUB_CARD, {})
+
+    assert seen["feasibility"] == 1
+    assert seen["resolve"] == 1
+    assert result.build_card is _STUB_CARD
+    assert not result.accepted
+
+
+def test_dispatch_additive_impossible_does_not_resolve(monkeypatch, budget_gamer_brief):
+    brief = budget_gamer_brief.model_copy(deep=True)
+
+    class _V:
+        verdict = "impossible"
+        reason = "floor exceeds ceiling"
+
+    monkeypatch.setattr(refine, "estimate_feasibility", lambda b: _V())
+    monkeypatch.setattr(refine, "_select_build_with_pins",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not re-solve")))
+
+    ops = RefinementOps(brief_edit={"field": "performance",
+                                    "value": {"target_resolution": "4K",
+                                              "target_framerate": 144,
+                                              "source": "user_stated"}})
+    result = dispatch_refinement(ops, brief, _bands(gpu=(20000, 25000, 30000)), _STUB_CARD, {})
+    assert result.build_card is _STUB_CARD           # unchanged
+    assert result.message and "impossible" in result.message.lower()
+
+
+# ── 2. pin / reject / locked_parts round-trip ─────────────────────────────────
+
+def _patch_resolve(monkeypatch):
+    """Stub the re-solve + diff so pin/reject tests stay offline and deterministic."""
+    monkeypatch.setattr(refine, "_select_build_with_pins", lambda *a, **k: _STUB_CARD)
+    monkeypatch.setattr(refine, "diff_and_bias", lambda old, new, *a, **k: new)
+
+
+def test_dispatch_pin_records_locked_part(monkeypatch, budget_gamer_brief):
+    _patch_resolve(monkeypatch)
+    brief = budget_gamer_brief.model_copy(deep=True)
+    card = _card([_part(ComponentSlot.gpu, "GPU-1", 25000),
+                  _part(ComponentSlot.cpu, "CPU-1", 15000)])
+    locked: dict[str, str] = {}
+
+    dispatch_refinement(RefinementOps(pin=ComponentSlot.gpu), brief,
+                        _bands(gpu=(20000, 25000, 30000)), card, locked)
+    assert locked == {"gpu": "GPU-1"}
+
+
+def test_dispatch_reject_appends_and_unpins(monkeypatch, budget_gamer_brief):
+    _patch_resolve(monkeypatch)
+    brief = budget_gamer_brief.model_copy(deep=True)
+    card = _card([_part(ComponentSlot.gpu, "GPU-1", 25000)])
+    locked: dict[str, str] = {"gpu": "GPU-1"}   # gpu was pinned in a prior round
+
+    dispatch_refinement(
+        RefinementOps(reject={"slot": "gpu", "product_id": "GPU-1", "reason": "too pricey"}),
+        brief, _bands(gpu=(20000, 25000, 30000)), card, locked,
+    )
+
+    rejected = {r.product_id for r in brief.hard_constraints.rejected_parts}
+    assert "GPU-1" in rejected
+    assert "gpu" not in locked, "rejecting a pinned slot must unpin it"
+
+
+def test_dispatch_reject_resolves_product_id_from_card(monkeypatch, budget_gamer_brief):
+    """reject with only a slot (no product_id) resolves the id from the current card."""
+    _patch_resolve(monkeypatch)
+    brief = budget_gamer_brief.model_copy(deep=True)
+    card = _card([_part(ComponentSlot.psu, "PSU-9", 4500)])
+
+    dispatch_refinement(RefinementOps(reject={"slot": "psu", "reason": "loud"}),
+                        brief, _bands(psu=(3500, 4500, 6000)), card, {})
+    assert "PSU-9" in {r.product_id for r in brief.hard_constraints.rejected_parts}
+
+
+def test_pin_then_reject_round_trip(monkeypatch, budget_gamer_brief):
+    """Pin a slot one round, reject it the next — it must end up unpinned + rejected."""
+    _patch_resolve(monkeypatch)
+    brief = budget_gamer_brief.model_copy(deep=True)
+    card = _card([_part(ComponentSlot.gpu, "GPU-1", 25000)])
+    locked: dict[str, str] = {}
+    bands = _bands(gpu=(20000, 25000, 30000))
+
+    dispatch_refinement(RefinementOps(pin=ComponentSlot.gpu), brief, bands, card, locked)
+    assert locked == {"gpu": "GPU-1"}
+
+    dispatch_refinement(RefinementOps(reject={"slot": "gpu", "product_id": "GPU-1"}),
+                        brief, bands, card, locked)
+    assert "gpu" not in locked
+    assert "GPU-1" in {r.product_id for r in brief.hard_constraints.rejected_parts}
+
+
+def test_dispatch_accept_returns_product_ids(budget_gamer_brief):
+    brief = budget_gamer_brief.model_copy(deep=True)
+    card = _card([_part(ComponentSlot.gpu, "GPU-1", 25000),
+                  _part(ComponentSlot.cpu, "CPU-1", 15000)])
+    result = dispatch_refinement(RefinementOps(accept=True), brief,
+                                 _bands(gpu=(20000, 25000, 30000)), card, {})
+    assert result.accepted
+    assert result.product_ids == ["GPU-1", "CPU-1"]
+
+
+# ── 3. diff_and_bias incumbent bias ───────────────────────────────────────────
+
+def test_diff_keeps_valid_incumbent(budget_gamer_brief):
+    """Old part still in band + not rejected → keep it; no changed_slots entry."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    old = _card([_part(ComponentSlot.gpu, "GPU-OLD", 25000)])
+    new = _card([_part(ComponentSlot.gpu, "GPU-NEW", 26000)])
+    bands = _bands(gpu=(20000, 25000, 30000))
+
+    out = diff_and_bias(old, new, locked_parts={}, brief=brief,
+                        price_bands=bands, neo4j_available=False)
+
+    assert out.parts[0].product_id == "GPU-OLD", "valid incumbent must be retained"
+    assert out.changed_slots == [], "a retained incumbent reads as unchanged"
+
+
+def test_diff_replaces_out_of_band_incumbent(budget_gamer_brief):
+    """Old part now above the (widened) band → keep the new pick, record the change."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    old = _card([_part(ComponentSlot.gpu, "GPU-OLD", 50000)])   # far above band
+    new = _card([_part(ComponentSlot.gpu, "GPU-NEW", 26000)])
+    bands = _bands(gpu=(20000, 25000, 30000))                   # widened high = 36000
+
+    out = diff_and_bias(old, new, locked_parts={}, brief=brief,
+                        price_bands=bands, neo4j_available=False)
+
+    assert out.parts[0].product_id == "GPU-NEW"
+    assert len(out.changed_slots) == 1
+    entry = out.changed_slots[0]
+    assert entry["slot"] == "gpu"
+    assert entry["old_product_id"] == "GPU-OLD"
+    assert entry["new_product_id"] == "GPU-NEW"
+    assert entry["reason"] == "out_of_band"
+
+
+def test_diff_replaces_rejected_incumbent(budget_gamer_brief):
+    """Old part rejected → keep the new pick with reason 'rejected'."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    apply_reject(brief, "GPU-OLD", "user rejected")
+    old = _card([_part(ComponentSlot.gpu, "GPU-OLD", 25000)])   # in band, but rejected
+    new = _card([_part(ComponentSlot.gpu, "GPU-NEW", 26000)])
+    bands = _bands(gpu=(20000, 25000, 30000))
+
+    out = diff_and_bias(old, new, locked_parts={}, brief=brief,
+                        price_bands=bands, neo4j_available=False)
+
+    assert out.parts[0].product_id == "GPU-NEW"
+    assert out.changed_slots[0]["reason"] == "rejected"
+
+
+def test_diff_pinned_slot_is_never_biased(budget_gamer_brief):
+    """A user-pinned slot always takes the new (pinned) part — bias never applies."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    old = _card([_part(ComponentSlot.gpu, "GPU-OLD", 25000)])
+    new = _card([_part(ComponentSlot.gpu, "GPU-PINNED", 27000)])
+    bands = _bands(gpu=(20000, 25000, 30000))
+
+    out = diff_and_bias(old, new, locked_parts={"gpu": "GPU-PINNED"}, brief=brief,
+                        price_bands=bands, neo4j_available=False)
+    assert out.parts[0].product_id == "GPU-PINNED"
+
+
+# ── Pure brief-patch helpers ──────────────────────────────────────────────────
+
+def test_patch_structural_field_nested(budget_gamer_brief):
+    brief = budget_gamer_brief.model_copy(deep=True)
+    patched = patch_brief_field(brief, "primary_use_case", "content_creation")
+    assert patched.purpose.primary_use_case == "content_creation"
+    assert brief.purpose.primary_use_case == "gaming", "original brief must be untouched"
+
+def test_patch_budget_scope(budget_gamer_brief):
+    brief = budget_gamer_brief.model_copy(deep=True)
+    patched = patch_brief_field(brief, "budget.scope", "pc_plus_monitor")
+    assert patched.budget.scope == "pc_plus_monitor"
+
+def test_rescale_budget_proportional(budget_gamer_brief):
+    brief = budget_gamer_brief.model_copy(deep=True)
+    old_ceiling = brief.budget.ceiling
+    old_max = brief.budget.comfortable_max
+    new = rescale_budget(brief, old_ceiling * 2)
+    assert new.budget.ceiling == old_ceiling * 2
+    assert new.budget.comfortable_max == old_max * 2
