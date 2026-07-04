@@ -1,0 +1,15 @@
+product_id,name,chip_model,gaming_raster_1080p_ultra_pct,content_creation_ai_pro_viz_pct,source,source_url,confidence
+gpu-008,PULSE RX 7600 XT 16G,RX 7600 XT,36.2,24.4,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-001,RTX 4060 Ventus 2X 8G OC,RTX 4060,36.6,27.8,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-002,TUF Gaming RTX 4060 Ti 8GB OC,RTX 4060 Ti 8GB,45.5,32.7,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-009,NITRO+ RX 7800 XT 16GB,RX 7800 XT,56.9,38.8,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-014,RX 9070 Gaming OC 16G,RX 9070,70.0,51.8,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-013,NITRO+ RX 9070 XT 16GB,RX 9070 XT,76.1,55.2,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-003,GeForce RTX 4070 Gaming OC 12G,RTX 4070,58.4,44.2,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-011,TUF Gaming RTX 5070 12GB OC,RTX 5070,68.1,51.9,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-004,RTX 4070 Super Gaming X Slim 12G,RTX 4070 Super,67.2,50.7,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-005,ROG Strix RTX 4070 Ti Super 16GB OC,RTX 4070 Ti Super,74.1,56.2,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-010,Red Devil RX 7900 XTX 24GB,RX 7900 XTX,79.4,52.6,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-006,RTX 4080 Super Gaming OC 16G,RTX 4080 Super,83.2,65.6,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-012,RTX 5080 16G Gaming X Trio,RTX 5080,84.9,69.8,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-007,ROG Strix RTX 4090 OC 24GB,RTX 4090,95.2,78.9,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct

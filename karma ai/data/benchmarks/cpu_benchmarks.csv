@@ -1,0 +1,13 @@
+product_id,name,chip_model,gaming_pct,single_thread_pct,multi_thread_pct,source,confidence,notes
+cpu-001,Core i3-14100F,i3-14100F,44.0,75.4,15.0,estimated,estimated,"Not TH-tested. single_thread = same-arch proxy from i5-14400F (identical P-core IPC/clock). gaming/multi_thread set as catalog floor (weakest chip, 4C/8T, cheapest at ₹9k) — ordinal placement, not precise."
+cpu-008,Ryzen 5 5600X,Ryzen 5 5600X,58.0,68.0,21.0,estimated,estimated,"Not TH-tested (pre-7000-series). single_thread from PassMark raw (3812 vs i3-14100F's 3776, same tier). multi_thread derived from technical.city's directly-measured +41.8% aggregate ratio vs i3-14100F."
+cpu-002,Core i5-14400F,i5-14400F,58.0,75.4,38.0,"tomshardware_cpu_hierarchy_2026 (gaming/single) + estimated (multi)",mixed,"gaming/single_thread direct from TH. multi_thread interpolated by core count (10C/16T) between Ryzen 5 7600X (31.3%, 6C/12T) and i5-14600K (53.9%, 14C/20T)."
+cpu-009,Ryzen 5 7600X,Ryzen 5 7600X,67.3,71.5,31.3,tomshardware_cpu_hierarchy_2026,direct,
+cpu-003,Core i5-14600K,i5-14600K,72.8,85.8,53.9,tomshardware_cpu_hierarchy_2026,direct,
+cpu-006,Core Ultra 5 245K,Core Ultra 5 245K,67.1,92.5,55.8,tomshardware_cpu_hierarchy_2026,direct,
+cpu-010,Ryzen 7 7700X,Ryzen 7 7700X,70.6,84.0,46.8,tomshardware_cpu_hierarchy_2026,direct,
+cpu-004,Core i7-14700K,i7-14700K,76.4,90.1,75.1,tomshardware_cpu_hierarchy_2026,direct,
+cpu-011,Ryzen 9 7900X,Ryzen 9 7900X,69.2,88.5,67.4,"tomshardware_cpu_hierarchy_2026 (gaming) + estimated (single/multi)",mixed,"gaming direct from TH. single_thread: PassMark raw (4317) landed just above i5-14600K anchor (4299/85.8%) — small local interpolation (+18 pts), not extrapolation. multi_thread interpolated by core count (12C/24T) between Ryzen 7 7700X (46.8%, 8C) and Ryzen 9 7950X (88%, 16C), same Zen 4 family."
+cpu-007,Core Ultra 9 285K,Core Ultra 9 285K,71.8,98.5,88.7,tomshardware_cpu_hierarchy_2026,direct,
+cpu-005,Core i9-14900K,i9-14900K,78.2,95.4,83.9,tomshardware_cpu_hierarchy_2026,direct,
+cpu-012,Ryzen 9 7950X,Ryzen 9 7950X,71.0,85.2,88.0,tomshardware_cpu_hierarchy_2026,direct,
