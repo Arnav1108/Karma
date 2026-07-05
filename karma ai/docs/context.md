@@ -167,6 +167,44 @@ no code changes. Do not re-open these as mysteries.**
    (required_tier 3 vs 4) — separate, pre-existing LLM-threshold variance,
    not a regression from this fix; not further pursued per this session's
    scope.
+5. **RAM/STORAGE `GOOD_FOR` edges are 100% pre-migration stub data — no real
+   tier/score.** Surfaced 2026-07-05 while fixing a second bug found during
+   item 4 verification: `fitness_ranked` in `node3_selector.py` was set to
+   `True` whenever `fitness_filter` returned a non-empty list, but the
+   function fails open (returns every candidate, unranked) for categories
+   with zero `GOOD_FOR` coverage — so motherboard/psu/case/cooler/fans (0
+   edges, confirmed via direct graph query) were mislabeled as
+   fitness-ranked in the Step 3 LLM prompt ("best-fit-first" / "(fitness rank
+   #N)") despite having no signal at all. Fixed in `agents/db/neo4j.py` /
+   `agents/nodes/node3_selector.py`
+   (`fix(graph): make fitness_ranked reflect real GOOD_FOR data, not
+   fail-open non-emptiness`, `phase4/fitness-filter-softgate`):
+   `fitness_filter` now returns `FitnessRanking(ordered_ids, is_real_ranking)`
+   instead of a plain list, with `is_real_ranking = bool(scored)` computed
+   from data the function already gathers — no extra query, no
+   category-level pre-check that could drift from the per-call ranking.
+   While live-verifying that fix across all 8 fixtures, RAM and STORAGE
+   turned up with `is_real_ranking=False` too, despite a direct graph query
+   showing 55 and 60 `GOOD_FOR` edges respectively (i.e. real coverage by
+   count). A follow-up query explains it: 0/55 RAM edges and 0/60 STORAGE
+   edges carry `tier`/`score` — every one of them still only has the
+   pre-migration `weight` property from before `1a69bb0`
+   ("migrate fitness_filter from GOOD_FOR.weight to tier/score") and
+   `a1f3410` ("remove GOOD_FOR stub weights that block fitness_filter
+   fail-open"). Only GPU (42 edges) and CPU (48 edges) were ever re-seeded
+   with real benchmark-derived tier/score data by `1dc9f32`; RAM/STORAGE
+   were left on the old stub schema and never migrated. Practical effect:
+   fitness signal today can only ever influence GPU/CPU selection — RAM and
+   STORAGE always fail open, correctly now (previously incorrectly masked as
+   "ranked" by the item-4-adjacent bug above) — even though
+   `derive_fitness_thresholds` still produces a plausible-looking 0.0–1.0
+   threshold for both slots every time. NOT fixed as part of this commit —
+   same class of gap as item 1 (fitness/GOOD_FOR weights still stubbed), but
+   scoped specifically to RAM/STORAGE now that GPU/CPU are resolved. Needs
+   real benchmark-derived tier/score edges seeded for RAM/STORAGE (wherever
+   `1dc9f32`'s GPU/CPU seeding logic lives, likely `data/graph/seed_graph.py`
+   or a sibling script) before fitness ranking means anything for those two
+   slots.
 
 **Housekeeping — DONE (2026-07-03).** CLAUDE.md, karma ai/DESIGN.md, docs/
 synced against the calibration + floor-enforcement commits and merged to main:
