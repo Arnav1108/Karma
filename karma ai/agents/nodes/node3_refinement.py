@@ -123,6 +123,13 @@ def parse_refinement_request(
         f"  - {s.name} ({s.category}, {s.frequency}, {s.intensity})"
         for s in brief.software
     ) or "  (none listed)"
+    extras_summary = (
+        f"  rgb_pref: {brief.extras.rgb_pref}\n"
+        f"  visual_style: {brief.extras.visual_style}\n"
+        f"  connectivity_needs: {brief.extras.connectivity_needs}\n"
+        f"  specific_part_requests: "
+        f"{[r.model_dump() for r in brief.extras.specific_part_requests]}"
+    )
 
     prompt = f"""You are parsing a user's refinement request for a PC build recommendation.
 
@@ -133,6 +140,8 @@ Current use case      : {brief.purpose.primary_use_case} / {brief.purpose.sub_ca
 Current ceiling       : ₹{brief.budget.ceiling:,}
 Current software list :
 {software_summary}
+Current extras        :
+{extras_summary}
 
 User said: "{user_input}"
 
@@ -162,6 +171,15 @@ several fields at once. Leave a field null/false when it does not apply.
       Valorant/CS2/GTA V → field=software,
       value=[{{"name":"Blender","category":"3d","frequency":"secondary","intensity":"moderate"}}]
       (NOT the full list — Valorant/CS2/GTA V are kept automatically).
+    IMPORTANT for "extras": the user's EXISTING extras (rgb_pref, visual_style,
+      connectivity_needs, specific_part_requests) are merged in automatically —
+      value must contain ONLY the sub-field(s) that changed this turn, NOT the
+      full extras object. `connectivity_needs` specifically is UNIONED with the
+      existing list — do not re-list connectivity needs the user already has.
+      Example: current connectivity_needs=["wifi","bluetooth"], user says "also
+      want thunderbolt" → field=extras, value={{"connectivity_needs":["thunderbolt"]}}
+      (NOT the full list, and omit rgb_pref/visual_style/specific_part_requests
+      since the user didn't mention them this turn).
 
 - budget_change (int): a NEW TOTAL budget ceiling in INR. "90k" → 90000,
     "1.5 lakh" → 150000.
@@ -215,6 +233,53 @@ def _merge_list_field(existing: list, incoming: Any) -> list:
     return merged
 
 
+def _merge_connectivity_needs(existing: list, incoming: Any) -> list:
+    """Union-merge `extras.connectivity_needs` (list of enum strings).
+
+    Unlike `software`, entries are plain strings with no name to key on, so an
+    "upsert" is simply a de-duplicated union: existing entries keep their
+    order, and any new ones not already present append at the end.
+    """
+    items = incoming if isinstance(incoming, list) else [incoming]
+    merged = list(existing)
+    seen = set(merged)
+    for item in items:
+        if item not in seen:
+            merged.append(item)
+            seen.add(item)
+    return merged
+
+
+def _merge_extras_field(existing: dict, incoming: Any) -> dict:
+    """Merge a partial `extras` edit into the existing Extras dict (task §2/§4).
+
+    Mirrors the software fix's shape but for a nested object: the prompt asks
+    the LLM to return ONLY the sub-field(s) that changed this turn, so a blind
+    `ref["extras"] = value` would wipe every other sub-field (rgb_pref,
+    visual_style, specific_part_requests) back to its schema default. Any
+    sub-field absent from `incoming` is preserved from `existing`.
+    `connectivity_needs` is unioned rather than replaced — same rationale as
+    `_merge_list_field` for software: the LLM only sees one turn's addition,
+    not the full existing list.
+    """
+    if not isinstance(incoming, dict):
+        logger.warning(
+            "[Refine] extras edit value was not a dict (got %s) — falling back "
+            "to full replace",
+            type(incoming).__name__,
+        )
+        return incoming
+    merged = dict(existing)
+    for key, value in incoming.items():
+        if key == "connectivity_needs":
+            merged[key] = _merge_connectivity_needs(
+                existing.get("connectivity_needs", []), value
+            )
+        else:
+            merged[key] = value
+    return merged
+
+
 def patch_brief_field(
     brief: UserBuildBrief, field_name: str, value: Any
 ) -> UserBuildBrief:
@@ -226,9 +291,11 @@ def patch_brief_field(
 
     List-valued fields (currently only `software`) are MERGED via
     `_merge_list_field`, not replaced — the LLM's `value` is item(s) to upsert.
-    Scalar/object fields (performance, extras, physical, longevity,
-    primary_use_case, budget.scope) replace wholesale, matching what the LLM
-    was asked to produce for those.
+    The `extras` object is merged sub-field-by-sub-field via `_merge_extras_field`
+    (with `connectivity_needs` further unioned as a list) rather than replaced
+    wholesale, for the same reason. Other scalar/object fields (performance,
+    physical, longevity, primary_use_case, budget.scope) replace wholesale,
+    matching what the LLM was asked to produce for those.
 
     Re-validates through UserBuildBrief so a malformed LLM value raises a
     ValidationError the caller can trap rather than silently corrupting the brief.
@@ -239,7 +306,9 @@ def patch_brief_field(
     for key in path[:-1]:
         ref = ref[key]
     existing = ref.get(path[-1])
-    if isinstance(existing, list):
+    if field_name == "extras" and isinstance(existing, dict):
+        ref[path[-1]] = _merge_extras_field(existing, value)
+    elif isinstance(existing, list):
         ref[path[-1]] = _merge_list_field(existing, value)
     else:
         ref[path[-1]] = value

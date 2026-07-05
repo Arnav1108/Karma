@@ -424,3 +424,102 @@ def test_dispatch_additive_software_edit_preserves_list_end_to_end(monkeypatch, 
     assert names == {"Valorant", "CS2", "GTA V", "Blender"}, (
         f"existing software entries were dropped by the additive edit: {names}"
     )
+
+
+# ── extras merge (not full-replacement) ───────────────────────────────────────
+# Same gap class as software, but nested one level deeper: `extras` is an
+# object (rgb_pref, visual_style, connectivity_needs, specific_part_requests),
+# and patch_brief_field used to do a blind `ref["extras"] = value` for it too.
+# An LLM asked to edit "extras" for "also want thunderbolt" only sees that
+# turn's message — a naive full-replace patch would silently wipe rgb_pref /
+# visual_style back to their schema defaults AND drop every connectivity_needs
+# entry the value dict didn't re-list. budget_gamer_brief's fixture extras are
+# rgb_pref="minimal", visual_style="no_preference", connectivity_needs=["wifi"]
+# (see data/fixtures/budget_gamer.json) — these tests pin down that an edit
+# mentioning only one sub-field preserves the rest.
+
+def test_patch_extras_add_connectivity_need_preserves_existing(budget_gamer_brief):
+    """'also want thunderbolt' → value={connectivity_needs:[thunderbolt]} must NOT
+    drop 'wifi' or reset rgb_pref/visual_style to defaults."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    assert brief.extras.connectivity_needs == ["wifi"], (
+        "fixture assumption changed — update this test's expectations"
+    )
+    assert brief.extras.rgb_pref == "minimal"
+
+    patched = patch_brief_field(
+        brief, "extras", {"connectivity_needs": ["thunderbolt"]},
+    )
+
+    assert patched.extras.connectivity_needs == ["wifi", "thunderbolt"], (
+        f"expected existing 'wifi' preserved plus 'thunderbolt', "
+        f"got {patched.extras.connectivity_needs}"
+    )
+    assert patched.extras.rgb_pref == "minimal", (
+        "rgb_pref must be preserved, not reset to default, by a "
+        "connectivity_needs-only edit"
+    )
+    assert patched.extras.visual_style == "no_preference"
+    # Original untouched (patch_brief_field must not mutate in place).
+    assert brief.extras.connectivity_needs == ["wifi"]
+
+
+def test_patch_extras_connectivity_needs_dedupes(budget_gamer_brief):
+    """Re-mentioning an existing connectivity need must not duplicate it."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    patched = patch_brief_field(brief, "extras", {"connectivity_needs": ["wifi"]})
+    assert patched.extras.connectivity_needs == ["wifi"], "must not duplicate 'wifi'"
+
+
+def test_patch_extras_update_rgb_pref_preserves_connectivity_needs(budget_gamer_brief):
+    """Changing rgb_pref alone must not touch connectivity_needs or visual_style."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    patched = patch_brief_field(brief, "extras", {"rgb_pref": "want_rgb"})
+    assert patched.extras.rgb_pref == "want_rgb"
+    assert patched.extras.connectivity_needs == ["wifi"], (
+        "connectivity_needs must be preserved by an rgb_pref-only edit"
+    )
+    assert patched.extras.visual_style == "no_preference"
+
+
+def test_dispatch_additive_extras_edit_preserves_fields_end_to_end(monkeypatch, budget_gamer_brief):
+    """Full path: parse_refinement_request -> dispatch_refinement must not lose
+    existing extras sub-fields.
+
+    Mocks call_structured to return exactly what a real LLM is instructed to
+    return per the updated prompt (only the changed sub-field), proving the
+    merge happens regardless of which layer (prompt compliance vs. patch
+    logic) is doing the work — dispatch_refinement is what actually reaches
+    the brief.
+    """
+    brief = budget_gamer_brief.model_copy(deep=True)
+
+    def fake_call_structured(prompt, response_model, **kwargs):
+        return RefinementOps(
+            brief_edit={
+                "field": "extras",
+                "value": {"connectivity_needs": ["thunderbolt"]},
+            }
+        )
+
+    monkeypatch.setattr(refine, "call_structured", fake_call_structured)
+
+    class _V:
+        verdict = "comfortable"
+
+    monkeypatch.setattr(refine, "estimate_feasibility", lambda b: _V())
+    monkeypatch.setattr(refine, "_select_build_with_pins", lambda *a, **k: _STUB_CARD)
+    monkeypatch.setattr(refine, "diff_and_bias", lambda old, new, *a, **k: new)
+
+    ops = refine.parse_refinement_request(
+        "also want thunderbolt", brief, _STUB_CARD
+    )
+    result = dispatch_refinement(ops, brief, _bands(gpu=(20000, 25000, 30000)), _STUB_CARD, {})
+
+    assert result.brief.extras.connectivity_needs == ["wifi", "thunderbolt"], (
+        f"existing connectivity_needs was dropped by the additive edit: "
+        f"{result.brief.extras.connectivity_needs}"
+    )
+    assert result.brief.extras.rgb_pref == "minimal", (
+        "rgb_pref must survive an extras edit that didn't mention it"
+    )
