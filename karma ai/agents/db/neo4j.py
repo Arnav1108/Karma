@@ -1,5 +1,6 @@
 import logging
 import os
+from dataclasses import dataclass
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -153,6 +154,22 @@ def _get_driver():
     return _driver
 
 
+@dataclass
+class FitnessRanking:
+    """Result of fitness_filter: an ordering plus whether it means anything.
+
+    is_real_ranking is True iff at least one candidate in THIS call had a real
+    GOOD_FOR edge (i.e. `scored` was non-empty) — not merely whether the graph
+    or driver was reachable. A category with zero GOOD_FOR coverage (e.g.
+    motherboard/psu/case/cooler/fans, which have no benchmark data seeded)
+    still returns a full ordered_ids list via fail-open, but is_real_ranking
+    is False: that list is catalog-order passthrough, not a fitness ranking,
+    and callers must not present it to the LLM as "best-fit-first."
+    """
+    ordered_ids: list[str]
+    is_real_ranking: bool
+
+
 class Neo4jClient:
     def ping(self) -> bool:
         """Return True if Neo4j is reachable; False on any connection failure."""
@@ -232,7 +249,7 @@ class Neo4jClient:
         candidate_product_ids: list[str],
         use_case: str,
         fitness_threshold: float,
-    ) -> list[str]:
+    ) -> FitnessRanking:
         """
         Rank candidates by GOOD_FOR fitness for use_case — never excludes one.
 
@@ -253,6 +270,13 @@ class Neo4jClient:
         Results are ordered: all scored candidates (score descending, tier as a
         tie-break) then unranked fail-opens.
 
+        Categories with zero GOOD_FOR coverage at all (e.g. motherboard, psu, case,
+        cooler, fans — no benchmark edges seeded for any use case) fail open for
+        every candidate; that produces a full ordered_ids list with an empty
+        `scored`, which is catalog order, not a fitness ranking. is_real_ranking
+        distinguishes the two cases so callers never mistake a fail-open passthrough
+        for a real signal (see docs/context.md open item 4 follow-up).
+
         Args:
             candidate_product_ids: Product IDs to filter.
             use_case: Target use-case name matching UseCase.name in the graph.
@@ -260,19 +284,28 @@ class Neo4jClient:
                                only to break score ties, never to drop a candidate.
 
         Returns:
-            Ranked list: every candidate with a GOOD_FOR edge (score descending, tier
-            tie-break), then unranked fail-opens. Never shorter than the input
-            (barring driver failure, which falls back to the input order unchanged).
+            FitnessRanking(ordered_ids, is_real_ranking):
+              ordered_ids  — every candidate with a GOOD_FOR edge (score descending,
+                             tier tie-break), then unranked fail-opens. Never shorter
+                             than the input (barring driver failure, which falls back
+                             to the input order unchanged).
+              is_real_ranking — True iff at least one candidate had a real GOOD_FOR
+                             edge for use_case (i.e. `scored` was non-empty). False
+                             for an empty input, a driver failure, or a category with
+                             no GOOD_FOR coverage at all — in every such case
+                             ordered_ids is catalog order, not a fitness signal.
         """
         if not candidate_product_ids:
-            return []
+            return FitnessRanking(ordered_ids=[], is_real_ranking=False)
 
         required_tier = _required_tier(fitness_threshold)
 
         try:
             driver = _get_driver()
         except Exception:
-            return list(candidate_product_ids)
+            return FitnessRanking(
+                ordered_ids=list(candidate_product_ids), is_real_ranking=False
+            )
 
         scored: list[tuple[str, int, float]] = []
         unranked: list[str] = []
@@ -294,7 +327,10 @@ class Neo4jClient:
         # Primary: score descending. Tie-break only: meeting required_tier, then tier
         # itself — never a reason to drop a candidate, only to order equal scores.
         scored.sort(key=lambda x: (x[2], x[1] >= required_tier, x[1]), reverse=True)
-        return [pid for pid, _, _ in scored] + unranked
+        return FitnessRanking(
+            ordered_ids=[pid for pid, _, _ in scored] + unranked,
+            is_real_ranking=bool(scored),
+        )
 
     def get_component_fitness(
         self,

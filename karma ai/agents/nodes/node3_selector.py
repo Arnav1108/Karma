@@ -497,19 +497,25 @@ def select_part(
     # fitness_ranked tracks whether `working`'s order actually reflects the fitness
     # signal, so Step 3's prompt can surface that ranking instead of silently
     # numbering a catalog-order list as if it meant something it doesn't.
+    # This must come from FitnessRanking.is_real_ranking, not from ordered_ids being
+    # non-empty: categories with zero GOOD_FOR coverage (motherboard, psu, case,
+    # cooler, fans) still return a full ordered_ids list via fail-open, which would
+    # make a truthiness check on the list itself always True and mislabel every
+    # catalog-order passthrough as a real fitness ranking (see docs/context.md
+    # open item 4 follow-up).
     fitness_ranked = False
     if neo4j_available:
         by_id = {c["product_id"]: c for c in working}
-        fit_ids = neo4j.fitness_filter(
+        ranking = neo4j.fitness_filter(
             list(by_id.keys()),
             brief.purpose.primary_use_case,
             fitness_thresholds[slot],
         )
-        if fit_ids:
-            reordered = [by_id[pid] for pid in fit_ids if pid in by_id]
+        if ranking.ordered_ids:
+            reordered = [by_id[pid] for pid in ranking.ordered_ids if pid in by_id]
             if reordered:
                 working = reordered
-                fitness_ranked = True
+                fitness_ranked = ranking.is_real_ranking
         else:
             logger.info(
                 "[Node3] %s: fitness_filter returned empty (threshold %.2f) — keeping "
