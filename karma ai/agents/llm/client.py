@@ -5,10 +5,12 @@ is the *only* place the OpenAI client is instantiated and the only place the API
 read from the environment. It contains no node-specific logic.
 
 Public surface:
-    call_structured(prompt, response_model, *, system=None, max_retries=2) -> response_model
+    call_structured(prompt, response_model, *, system=None, max_retries=2,
+                     model=None, temperature=None) -> response_model
     call_text(prompt, *, system=None) -> str
     StructuredCallError
     DEFAULT_MODEL
+    THRESHOLD_MODEL
 """
 
 from __future__ import annotations
@@ -27,6 +29,10 @@ load_dotenv()
 
 # Model is configurable here / via env, never hardcoded deep in a call site.
 DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+# Stronger model reserved for calls whose reasoning quality drives every downstream pick
+# (currently: Node 3 fitness threshold derivation). See CLAUDE.md model allocation policy.
+THRESHOLD_MODEL = os.getenv("KARMA_THRESHOLD_MODEL", "gpt-4o")
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -69,6 +75,8 @@ def call_structured(
     *,
     system: str | None = None,
     max_retries: int = 2,
+    model: str | None = None,
+    temperature: float | None = None,
 ) -> T:
     """Call the model and return a validated instance of `response_model`.
 
@@ -80,9 +88,16 @@ def call_structured(
     error back into the conversation so the model can self-correct. The retry message
     distinguishes a JSON-syntax failure from a schema-shape failure. Once retries are
     exhausted, raises StructuredCallError carrying the last error and raw output.
+
+    `model` and `temperature` default to None, which preserves the existing behavior
+    (DEFAULT_MODEL, provider-default temperature) for every current call site. Pass them
+    explicitly to override per call — e.g. a lower temperature for a threshold-derivation
+    task that should be as deterministic as the task allows.
     """
     client = _get_client()
     schema = json.dumps(response_model.model_json_schema(), indent=2)
+    resolved_model = model or DEFAULT_MODEL
+    extra_kwargs: dict = {} if temperature is None else {"temperature": temperature}
 
     # JSON mode requires the word "JSON" to appear in the messages; the schema below also
     # gives the model the exact shape to target. Fully generic — no node specifics.
@@ -104,9 +119,10 @@ def call_structured(
     # One initial attempt plus up to max_retries corrective attempts.
     for attempt in range(max_retries + 1):
         completion = client.chat.completions.create(
-            model=DEFAULT_MODEL,
+            model=resolved_model,
             messages=messages,
             response_format={"type": "json_object"},
+            **extra_kwargs,
         )
         raw = completion.choices[0].message.content or ""
 

@@ -27,7 +27,7 @@ from ..db.neo4j import Neo4jClient
 from ..db.postgres import PostgresClient
 from ..feasibility.catalog_floor import slot_requirement_filter
 from ..feasibility.resolver import ResolvedRequirements, resolve_requirements
-from ..llm.client import call_structured
+from ..llm.client import THRESHOLD_MODEL, call_structured
 from ..schemas.brief import UserBuildBrief
 from ..schemas.build_card import BuildCard, BuildCardPart
 from ..schemas.feasibility import FeasibilityVerdict
@@ -338,7 +338,9 @@ def derive_fitness_thresholds(brief: UserBuildBrief) -> dict[ComponentSlot, floa
         "gpu=0.85, cpu=0.65, ram=0.45, storage=0.35, motherboard=0.50, "
         "psu=0.40, case=0.20, cooler=0.30, fans=0.15"
     )
-    result = call_structured(prompt, FitnessThresholds)
+    result = call_structured(
+        prompt, FitnessThresholds, model=THRESHOLD_MODEL, temperature=0
+    )
     return {
         ComponentSlot.gpu: result.gpu,
         ComponentSlot.cpu: result.cpu,
