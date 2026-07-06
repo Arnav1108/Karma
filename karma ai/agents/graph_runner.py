@@ -12,13 +12,16 @@ from agents.schemas import PriceBands, UserBuildBrief
 from agents.state.pipeline_state import PipelineState, new_state
 
 
-def run_from_brief(brief: UserBuildBrief, price_bands: PriceBands) -> PipelineState:
+def run_from_brief(
+    brief: UserBuildBrief, price_bands: PriceBands | None = None
+) -> PipelineState:
     """Run the pipeline from node_feasibility onward with a pre-built brief.
 
     Args:
         brief: A locked UserBuildBrief (from a fixture, API payload, or intake run).
-        price_bands: Pre-computed PriceBands (optional — node_allocate will
-            recompute if these are placeholder values).
+        price_bands: Pre-computed PriceBands (optional — node_allocate always
+            recomputes bands from the brief regardless, so this is never read
+            downstream; omit it entirely when the caller has none on hand).
 
     Returns:
         Final PipelineState after the graph reaches END.
