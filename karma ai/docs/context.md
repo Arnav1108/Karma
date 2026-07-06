@@ -232,6 +232,16 @@ no code changes. Do not re-open these as mysteries.**
    stub instead of seeding real data — see the RESOLVED note at the top of
    this item.
 
+6. **Threshold-derivation determinism — mostly fixed (2026-07-06,
+   `phase4/threshold-determinism`), one lever left unpulled.** `temperature=0`
+   + wiring up `KARMA_THRESHOLD_MODEL` (gpt-4o) collapsed a 5-run variance
+   probe on `ml_workstation` from ±0.05–0.10 range on 6/9 slots to exact-match
+   on 7/9; `fans`/`case` still moved ±0.05 on one of five runs — OpenAI's
+   documented temperature=0 non-determinism, not a code issue. Follow-up, not
+   yet implemented: pass `seed=` to the `derive_fitness_thresholds` call and
+   log `response.system_fingerprint` to detect backend changes — would likely
+   close the remaining 2/9 gap. Deferred as out of scope for this session.
+
 **Housekeeping — DONE (2026-07-03).** CLAUDE.md, karma ai/DESIGN.md, docs/
 synced against the calibration + floor-enforcement commits and merged to main:
 `6ea3920` (feat(feasibility): catalog-grounded verdict + shared cost/floor
