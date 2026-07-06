@@ -33,6 +33,11 @@ _USE_CASES = [
 # null-weight fail-open path, so a low flat number (e.g. gpu 0.4/0.2) silently
 # filters those use-cases down to zero GPU candidates instead of passing
 # everything through unweighted like an un-scored slot would.
+# ram and storage are omitted too: every edge here only ever carried the
+# pre-migration `weight` property (never re-seeded with real tier/score like
+# GPU/CPU were in 1dc9f32), so fitness_filter already fails open for both —
+# these weight-only edges are dead weight that risks reintroducing a hard
+# cutoff if fail-open logic changes later. See docs/context.md open item 5.
 _GOOD_FOR_WEIGHTS: dict[ComponentSlot, dict[str, float]] = {
     ComponentSlot.gpu: {
         "gaming":             0.9,
@@ -44,20 +49,6 @@ _GOOD_FOR_WEIGHTS: dict[ComponentSlot, dict[str, float]] = {
         "content_creation":   0.7,
         "work_productivity":  0.9,
         "general_use":        0.6,
-    },
-    ComponentSlot.ram: {
-        "gaming":             0.5,
-        "content_creation":   0.5,
-        "work_productivity":  0.5,
-        "general_use":        0.5,
-        "storage_homeserver": 0.5,
-    },
-    ComponentSlot.storage: {
-        "gaming":             0.4,
-        "content_creation":   0.4,
-        "work_productivity":  0.4,
-        "general_use":        0.4,
-        "storage_homeserver": 0.4,
     },
 }
 # !!! END STUB !!! ─────────────────────────────────────────────────────────────
