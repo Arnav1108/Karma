@@ -47,6 +47,7 @@ def _fake_select_part(
     req,
     remaining_budget=None,
     ddr4_bias=False,
+    min_psu_wattage=None,
 ):
     """Canned SlotOutcome so select_build never needs a live catalog/LLM call."""
     return node3_selector.SlotOutcome(

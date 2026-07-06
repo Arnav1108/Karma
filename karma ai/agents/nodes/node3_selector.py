@@ -25,7 +25,11 @@ from pydantic import BaseModel
 
 from ..db.neo4j import Neo4jClient
 from ..db.postgres import PostgresClient
-from ..feasibility.catalog_floor import slot_requirement_filter
+from ..feasibility.catalog_floor import (
+    filter_rejected,
+    required_psu_wattage,
+    slot_requirement_filter,
+)
 from ..feasibility.resolver import ResolvedRequirements, resolve_requirements
 from ..llm.client import THRESHOLD_MODEL, call_structured
 from ..schemas.brief import UserBuildBrief
@@ -97,10 +101,14 @@ class SlotOutcome:
                         the locked parts (real dead-end, message set).
       "over_budget"   → a valid part exists but the cheapest one exceeds the
                         remaining budget-pool / ceiling (message set).
+
+    specs carries the picked catalog row's specs JSONB (or None on a dead-end) so
+    the caller can accumulate the locked build's TDP for the PSU wattage floor.
     """
     part: BuildCardPart | None = None
     status: str = "ok"
     message: str | None = None
+    specs: dict | None = None
 
 
 def _get_ddr_gen(candidate: dict) -> int | None:
@@ -131,19 +139,14 @@ def _floor_filter(
     return slot_requirement_filter(slot, parts, req, brief, enforce_brand=False)
 
 
-def _reject_filter(parts: list[dict], brief: UserBuildBrief) -> list[dict]:
-    """Drop parts the user has explicitly rejected in a prior refinement round.
+def _psu_wattage_filter(parts: list[dict], min_wattage: int) -> list[dict]:
+    """Drop PSUs whose rated wattage can't power the locked build (+ headroom).
 
-    brief.hard_constraints.rejected_parts carries no slot field, but product_id
-    is the catalog's PRIMARY KEY and 1:1 with a single category/slot (see
-    data/catalog/seed.sql) — a product_id is never shared across slots. So a
-    flat product_id exclusion set is inherently slot-scoped: a rejected GPU
-    product_id can never match a RAM or any other slot's candidate.
+    The PSU analogue of the requirement floor: min_wattage is
+    required_psu_wattage(locked_specs) — the same cpu_tdp+gpu_tdp+headroom bar the
+    feasibility floor assumed a PSU could clear inside budget. Order-preserving.
     """
-    rejected_ids = {r.product_id for r in brief.hard_constraints.rejected_parts}
-    if not rejected_ids:
-        return parts
-    return [p for p in parts if p.get("product_id") not in rejected_ids]
+    return [p for p in parts if (p.get("specs") or {}).get("wattage", 0) >= min_wattage]
 
 
 def _fetch_floor(
@@ -153,6 +156,7 @@ def _fetch_floor(
     high: int,
     req: ResolvedRequirements,
     brief: UserBuildBrief,
+    min_psu_wattage: int | None = None,
 ) -> list[dict]:
     """Catalog query with the requirement floor applied as a HARD filter.
 
@@ -164,14 +168,24 @@ def _fetch_floor(
     relaxes only the price band — never the floor. Rejected parts (from a prior
     refinement 'swap') are dropped at the same choke point, so a rejected
     product_id can never re-enter the shortlist for any slot on a later pass.
+
+    For the PSU slot, min_psu_wattage adds a second hard floor — the wattage the
+    locked GPU+CPU draw plus headroom — applied at this SAME choke point, so the
+    price-band escalation ladder can never surface an underpowered PSU either.
     """
     parts = pg.get_parts_in_band(slot, low, high, in_stock=True)
-    parts = _reject_filter(parts, brief)
-    return _floor_filter(slot, parts, req, brief)
+    parts = filter_rejected(parts, brief)
+    parts = _floor_filter(slot, parts, req, brief)
+    if slot == ComponentSlot.psu and min_psu_wattage is not None:
+        parts = _psu_wattage_filter(parts, min_psu_wattage)
+    return parts
 
 
 def _floor_desc(
-    slot: ComponentSlot, req: ResolvedRequirements, brief: UserBuildBrief
+    slot: ComponentSlot,
+    req: ResolvedRequirements,
+    brief: UserBuildBrief,
+    min_psu_wattage: int | None = None,
 ) -> str:
     """Human-readable description of a slot's resolved floor (for dead-ends)."""
     if slot == ComponentSlot.gpu:
@@ -182,17 +196,22 @@ def _floor_desc(
         return f"≥{req.ram_gb} GB capacity"
     if slot == ComponentSlot.storage:
         return f"≥{req.storage_gb} GB, {brief.storage.speed_tier}"
+    if slot == ComponentSlot.psu and min_psu_wattage is not None:
+        return f"≥{min_psu_wattage} W for the locked build"
     return "no floor"
 
 
 def _no_floor_message(
-    slot: ComponentSlot, req: ResolvedRequirements, brief: UserBuildBrief
+    slot: ComponentSlot,
+    req: ResolvedRequirements,
+    brief: UserBuildBrief,
+    min_psu_wattage: int | None = None,
 ) -> str:
     return (
         f"No {slot.value} in stock meets the required floor "
-        f"({_floor_desc(slot, req, brief)}). Every in-catalog {slot.value} falls "
-        f"below this minimum for your workload. Consider relaxing the requirement "
-        f"or adjusting the target software / performance settings."
+        f"({_floor_desc(slot, req, brief, min_psu_wattage)}). Every in-catalog "
+        f"{slot.value} falls below this minimum for your workload. Consider relaxing "
+        f"the requirement or adjusting the target software / performance settings."
     )
 
 
@@ -366,6 +385,7 @@ def select_part(
     req: ResolvedRequirements,
     remaining_budget: int | None = None,
     ddr4_bias: bool = False,
+    min_psu_wattage: int | None = None,
 ) -> SlotOutcome:
     """Three-step funnel: Postgres catalog → Neo4j graph filter → LLM pick.
 
@@ -374,7 +394,11 @@ def select_part(
     threshold) relax:
       • Requirement floor — GPU VRAM / CPU tier / RAM capacity / storage
         capacity+type from resolve_requirements(). A floor-violating part never
-        reaches the shortlist (every fetch routes through _fetch_floor).
+        reaches the shortlist (every fetch routes through _fetch_floor). For the
+        PSU slot, min_psu_wattage is a THIRD hard floor at the same layer: the
+        selected PSU must supply the locked build's TDP + headroom, so a build
+        can't pass feasibility on a wattage assumption and then ship an
+        underpowered PSU.
       • Compatibility against locked_parts (socket / DDR gen / form factor).
 
     If the (widened) band yields no candidate that passes both, the price band is
@@ -390,7 +414,7 @@ def select_part(
     # ── Step 1: catalog query at the band, floor-filtered (20% widening retry) ─
     # _fetch_floor applies the resolved requirement floor as a HARD filter inside
     # the query layer, alongside in-stock and price-band filtering.
-    candidates = _fetch_floor(pg, slot, band.low, band.high, req, brief)
+    candidates = _fetch_floor(pg, slot, band.low, band.high, req, brief, min_psu_wattage)
     if not candidates:
         widened_low = int(band.low * (1 - _BAND_WIDEN_FACTOR))
         widened_high = int(band.high * (1 + _BAND_WIDEN_FACTOR))
@@ -398,7 +422,9 @@ def select_part(
             "[Node3] %s: no floor-meeting stock at [%d–%d]; widening band to [%d–%d]",
             slot.value, band.low, band.high, widened_low, widened_high,
         )
-        candidates = _fetch_floor(pg, slot, widened_low, widened_high, req, brief)
+        candidates = _fetch_floor(
+            pg, slot, widened_low, widened_high, req, brief, min_psu_wattage
+        )
 
     # ── Step 1b: DDR4 preference bias (tight budget only) ───────────────────
     # On a tight budget the RAM slot is selected before Motherboard, so an
@@ -451,9 +477,9 @@ def select_part(
             # Escalate the PRICE BAND across the full catalog. _fetch_floor keeps
             # the requirement floor a hard filter; _compatible_subset keeps
             # compatibility a hard filter. Neither is relaxed by escalation.
-            full = _fetch_floor(pg, slot, 0, _FULL_CATALOG_HIGH, req, brief)
+            full = _fetch_floor(pg, slot, 0, _FULL_CATALOG_HIGH, req, brief, min_psu_wattage)
             if not full:
-                msg = _no_floor_message(slot, req, brief)
+                msg = _no_floor_message(slot, req, brief, min_psu_wattage)
                 logger.warning("[Node3] %s: %s", slot.value, msg)
                 return SlotOutcome(status="no_floor", message=msg)
             working = _compatible_subset(neo4j, full, locked_parts, slot)
@@ -472,9 +498,9 @@ def select_part(
             # No compatibility rule applies (e.g. the first-locked slot), but the
             # floor still does. Escalate the price band across the full catalog
             # before declaring a dead-end — same ladder, floor never relaxed.
-            full = _fetch_floor(pg, slot, 0, _FULL_CATALOG_HIGH, req, brief)
+            full = _fetch_floor(pg, slot, 0, _FULL_CATALOG_HIGH, req, brief, min_psu_wattage)
             if not full:
-                msg = _no_floor_message(slot, req, brief)
+                msg = _no_floor_message(slot, req, brief, min_psu_wattage)
                 logger.warning("[Node3] %s: %s", slot.value, msg)
                 return SlotOutcome(status="no_floor", message=msg)
             working = full
@@ -602,6 +628,7 @@ def select_part(
             justification=picked.justification,
         ),
         status="ok",
+        specs=matched.get("specs") if isinstance(matched.get("specs"), dict) else None,
     )
 
 
@@ -668,6 +695,7 @@ def select_build(
     reuse_slots = {r.slot for r in brief.existing.reuse_parts if r.action == "keep"}
 
     locked_parts: dict[ComponentSlot, str] = {}  # slot → product_id
+    locked_specs: dict[ComponentSlot, dict] = {}  # slot → catalog specs (for PSU wattage)
     selected_parts: list[BuildCardPart] = []
     warnings: list[str] = []
     running_spend = 0
@@ -708,6 +736,13 @@ def select_build(
                 )
 
         # ── Three-step funnel ─────────────────────────────────────────────────
+        # PSU is selected after GPU + CPU lock (SELECTION_ORDER), so locked_specs
+        # already holds the build's TDP-bearing parts. required_psu_wattage() is
+        # the identical cpu_tdp+gpu_tdp+headroom bar the feasibility floor assumed,
+        # applied here as a hard candidate filter so the pick can't undershoot it.
+        min_psu_wattage = (
+            required_psu_wattage(locked_specs) if slot == ComponentSlot.psu else None
+        )
         remaining_budget = brief.budget.ceiling - running_spend
         outcome = select_part(
             slot=slot,
@@ -719,6 +754,7 @@ def select_build(
             req=req,
             remaining_budget=remaining_budget,
             ddr4_bias=(ddr4_bias and slot == ComponentSlot.ram),
+            min_psu_wattage=min_psu_wattage,
         )
         if outcome.part is None:
             # no_compatible / over_budget carry a plain-English message to surface;
@@ -754,6 +790,8 @@ def select_build(
                 continue
 
         locked_parts[slot] = part.product_id
+        if outcome.specs is not None:
+            locked_specs[slot] = outcome.specs
         selected_parts.append(part)
         running_spend += part.price_inr
 

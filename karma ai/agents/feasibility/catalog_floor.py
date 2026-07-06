@@ -22,6 +22,8 @@ Public surface:
     compute_catalog_floor(brief, req)   -> CatalogFloor | None
     min_viable_build(catalog, req, brief, enforce_brand) -> (total, parts) | None
     slot_requirement_filter(...)          per-slot floor filter (used by the sweep)
+    rejected_product_ids(brief)           canonical rejected-part id set (shared)
+    filter_rejected(parts, brief)         drop rejected catalog rows (shared)
 """
 
 from __future__ import annotations
@@ -41,8 +43,11 @@ logger = logging.getLogger(__name__)
 # revisit when real benchmark data lands (context.md open item 3).
 _TIER_MIN_CORES = {CpuTier.entry: 2, CpuTier.mid: 6, CpuTier.high: 8, CpuTier.hedt: 12}
 
-# PSU wattage sanity: wattage >= cpu_tdp + gpu_tdp + headroom. Ground-truth rule
-# only — Node 3 does not yet enforce PSU sizing as a compatibility family.
+# PSU wattage sanity: wattage >= cpu_tdp + gpu_tdp + headroom. Enforced in TWO
+# places off this single constant so they cannot drift: the min-viable-build
+# floor below (which the feasibility verdict promises is buildable) and Node 3's
+# PSU slot selection (via required_psu_wattage) — the actual pick is held to the
+# identical bar the floor assumed.
 _PSU_HEADROOM_W = 150
 
 _NVIDIA_MARKERS = ("RTX", "GTX")
@@ -56,6 +61,32 @@ def _gpu_vendor(part: dict) -> str:
     if name.startswith("RX") or "RX " in name:
         return "AMD"
     return "UNKNOWN"
+
+
+def rejected_product_ids(brief: UserBuildBrief) -> set[str]:
+    """Product IDs the user has explicitly rejected in prior refinement rounds.
+
+    THE single definition of "rejected" for the whole pipeline. All three
+    consumers of the requirement floor read it, so they cannot drift:
+      - min_viable_build below (feasibility verdict + Node 2 band repair),
+      - node3_selector's _fetch_floor (the actual Node 3 shortlist),
+      - node3_refinement's diff_and_bias (incumbent-bias validity check).
+
+    hard_constraints.rejected_parts carries no slot field, but product_id is the
+    catalog PRIMARY KEY and 1:1 with a single category/slot (data/catalog/seed.sql)
+    — a product_id is never shared across slots. So this flat id set is inherently
+    slot-scoped: a rejected GPU product_id can never match a RAM (or any other
+    slot's) candidate.
+    """
+    return {r.product_id for r in brief.hard_constraints.rejected_parts}
+
+
+def filter_rejected(parts: list[dict], brief: UserBuildBrief) -> list[dict]:
+    """Drop catalog rows whose product_id the user has rejected. Order-preserving."""
+    rejected = rejected_product_ids(brief)
+    if not rejected:
+        return parts
+    return [p for p in parts if p.get("product_id") not in rejected]
 
 
 def slot_requirement_filter(
@@ -94,6 +125,22 @@ def slot_requirement_filter(
     return out
 
 
+def required_psu_wattage(locked_specs: dict[ComponentSlot, dict]) -> int:
+    """Minimum PSU wattage for an already-selected set of parts.
+
+    Sum of every locked component's ``tdp_watts`` plus the same headroom margin
+    the feasibility floor (``min_viable_build``) assumes. Sharing ``_PSU_HEADROOM_W``
+    is the whole point: the floor promises a PSU with this much headroom exists
+    inside budget, so Node 3's PSU pick must clear the identical bar or that
+    promise is empty. Only GPU and CPU carry ``tdp_watts`` in the catalog, but the
+    sum is generic over all locked specs so a future power-drawing slot is caught.
+    """
+    total_tdp = sum(
+        (specs or {}).get("tdp_watts", 0) for specs in locked_specs.values()
+    )
+    return total_tdp + _PSU_HEADROOM_W
+
+
 def min_viable_build(
     catalog: list[dict],
     req: ResolvedRequirements,
@@ -110,6 +157,10 @@ def min_viable_build(
     by_slot: dict[ComponentSlot, list[dict]] = {}
     for slot in ComponentSlot:
         parts = [p for p in catalog if p["category"] == slot.value and p["in_stock"]]
+        # Honour user-rejected parts here too — the SAME exclusion Node 3 applies
+        # in _fetch_floor and diff_and_bias — so a rejected part can never anchor
+        # the feasibility verdict or the Node 2 band-repair floor.
+        parts = filter_rejected(parts, brief)
         by_slot[slot] = slot_requirement_filter(slot, parts, req, brief, enforce_brand)
 
     def cheapest(parts: list[dict]) -> dict | None:

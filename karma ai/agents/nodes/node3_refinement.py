@@ -24,6 +24,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from ..db.neo4j import Neo4jClient
+from ..feasibility.catalog_floor import rejected_product_ids
 from ..feasibility.estimate import estimate_feasibility
 from ..feasibility.resolver import resolve_requirements
 from ..llm.client import call_structured
@@ -495,7 +496,7 @@ def diff_and_bias(
 
     old_by_slot = {p.slot: p for p in old_card.parts}
     new_by_slot = {p.slot: p for p in new_card.parts}
-    rejected_ids = {r.product_id for r in brief.hard_constraints.rejected_parts}
+    rejected_ids = rejected_product_ids(brief)
 
     decided: dict[ComponentSlot, str] = {}
     for slot_name, product_id in locked_parts.items():
