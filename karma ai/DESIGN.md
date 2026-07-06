@@ -2,9 +2,9 @@
 
 > Living design document for the Karma ai recommendation pipeline (Karma Computers).
 > **Status legend:** 🔒 Locked · 🛠️ Implemented · 🚧 In design · ❓ Open
-> _Last updated: 2026-06-30_
+> _Last updated: 2026-07-06 (full-system audit reconciliation — every section verified against source, the live Postgres catalog, and the live Neo4j graph)_
 >
-> **Implementation status:** Phases 0–2 code-complete and merged to `main`. The full pipeline (Node 1 → Feasibility → Node 2 → Node 3 + refinement) is built, wired into a LangGraph `StateGraph`, and exercised by an integration test suite. Postgres (Session Pooler) and Neo4j (Enterprise edition, local Docker, seeded) are both live; all three compatibility families are enforced as hard filters. Remaining pre-production blocker: Neo4j needs migration off local Docker to a backend-reachable hosted instance. See §3, §9, §10.
+> **Implementation status:** Phases 0–4 code-complete and merged to `main`. The full pipeline (Node 1 → Feasibility → Node 2 → Node 3 + refinement) is built; Nodes 1–3 are wired into a LangGraph `StateGraph`, and the refinement loop runs as Phase 5 of the CLI harness (`run_pipeline.py`). Postgres (Session Pooler) and Neo4j (Enterprise edition, local Docker, seeded) are both live; all three compatibility families are enforced as hard filters; the feasibility verdict is deterministic and catalog-grounded; GPU/CPU fitness edges carry real benchmark-derived tier/score. Test suite: **40 passed, 0 skipped** (live DBs). Remaining pre-production blockers: Neo4j migration off local Docker, and the absence of any automated end-to-end test — see §9.
 
 ---
 
@@ -17,7 +17,7 @@ The pipeline is **design-first**: every agent is fully scoped and locked before 
 ```mermaid
 flowchart TD
     U([User]) -->|freeform conversation| N1[Node 1<br/>Information Extraction Agent]
-    N1 -->|User Build Brief JSON| FC{Feasibility Check<br/>rough estimate · LLM-assisted}
+    N1 -->|User Build Brief JSON| FC{Feasibility Check<br/>deterministic catalog-floor verdict<br/>LLM prose only}
     FC -->|impossible| FAIL[Surface to user:<br/>lower demands / raise budget]
     FC -->|comfortable or tight| PRE[Deterministic pre-steps:<br/>shopping list + fixed-cost subtraction]
     PRE --> N2[Node 2<br/>Budget Allocation Agent]
@@ -31,75 +31,90 @@ flowchart TD
 
 ## 2. Pipeline Architecture
 
-### 2.1 Node One — Information Extraction Agent 🔒
+### 2.1 Node One — Information Extraction Agent 🔒 🛠️
 
 - **Role:** Conversation-first intake. A set of **predefined, structured questions**, each answered by the user in a **freeform paragraph**. Not dropdowns, not open-ended free chat — fixed questions, paragraph answers.
 - **Intake-model decision (conversation-first over wizard):** chosen deliberately. The build-requirement space is combinatorial and cannot be enumerated as wizard branches; conversation is the agentic thesis of the product; and the choice is **reversible** because both intake modes would produce the *identical* Brief — a guided wizard can be added later as additive front-end UI without touching any downstream node.
 - **Question flow:**
-  - **One question per turn**, but extraction is **opportunistic against the full Brief schema** — anything the user volunteers (even if it answers a later question) is captured immediately and the corresponding questions are skipped.
-  - **Questions are static / predefined, not dynamically branched.** A user's answer never changes *which* questions are asked; it only affects downstream nodes. The sole exception is targeted **ask-if-ambiguous** clarifications (e.g. "video editing" → "which software?").
+  - **One question per turn**, but extraction is **opportunistic against the full Brief schema** — anything the user volunteers (even if it answers a later question) is captured immediately and the corresponding questions are skipped (`newly_filled_sections` diff feeds `asked_so_far` in the harness).
+  - **Questions are static / predefined, not dynamically branched.** A user's answer never changes *which* questions are asked; it only affects downstream nodes.
   - **Final question is open-ended**, asked after the others: *"any hard constraints / must-haves / must-nots?"* → populates the pinned `hard_constraints` block (`source: user_stated`).
-- **Question set + stop condition:** there is **one finite, pre-prepared set of questions**. By default the agent works through the **entire set**, then locks the Brief — the list itself is the bound (no arbitrary max count). Two stop rules govern this:
-  - **Required floor:** **budget + primary use case must be answered before proceeding.** This is the gate — intake cannot move past it without both.
-  - **User early exit:** once the floor is met, if the user says "done" / "stop" at any point, intake ends there and the Brief locks immediately.
-  - Otherwise (no early exit), every question in the pre-prepared set is asked. _(Supersedes the earlier "stops once budget + primary use case are filled" wording, and replaces the interim "max question count" idea — there is no count, only the fixed set + user stop.)_
-- **Extraction + validation:** each paragraph answer → LLM returns JSON against the schema → **two-stage validation**: (1) JSON syntax (`JSON.parse`), (2) schema + enum conformance. Valid → merge into Brief. Malformed / non-conformant → retry then flag (exact retry policy deferred to testing).
+- **Question set + stop condition:** there is **one finite, pre-prepared set of 13 questions** (`QUESTION_SEQUENCE`). By default the agent works through the **entire set**, then locks the Brief — the list itself is the bound (no arbitrary max count). Two stop rules govern this:
+  - **Required floor:** **budget + primary use case must be answered before proceeding.** This is the gate — intake cannot move past it without both (as built: `comfortable_max > 0` AND `primary_use_case` non-empty, §7.6).
+  - **User early exit:** once the floor is met, if the user says "done" / "stop" at any point, intake ends there and the Brief locks immediately (regex `\b(done|stop)\b` inside `extract_turn`).
+  - Otherwise (no early exit), every question in the pre-prepared set is asked; on exhaustion the **harness** locks the Brief (`run_pipeline.py`), not the module.
+- **Extraction + validation:** each paragraph answer → LLM returns JSON against the schema → **two-stage validation**: (1) JSON syntax (`JSON.parse`), (2) schema + enum conformance. Valid → merge into Brief. As built, both stages live in `llm/client.py::call_structured` with **2 corrective retries** then `StructuredCallError`; `extract_turn` catches the error and returns the Brief unchanged for that turn (the retry policy previously "deferred to testing" is decided in code).
 - **Output:** Canonical **User Build Brief** JSON (full schema in **Appendix A**).
 - **Not responsible for** feasibility or contradiction checking — Node One has no tier/benchmark data; its only jobs are asking questions and forming valid JSON. The Feasibility Check is the arbiter of buildability at budget.
 
-### 2.2 Feasibility Check 🔒
+**As-built deviations from the locked spec (2026-07-06 audit):**
+- **Ask-if-ambiguous clarifications are not implemented.** The design carved out targeted clarifications (e.g. "video editing" → "which software?") as the sole exception to the static sequence; no mechanism for them exists — the sequence is strictly linear. Tracked in §9.
+- **Dead spec surface:** `_QuestionDef.is_final` is set but never read; `open_questions` (Appendix A: "drives follow-ups") is never populated by any code; `existing.existing_pc_build_id` is defined but consumed by nothing; the `inferred` and `skipped_by_user` source-flag values are never set programmatically (only `user_stated` via LLM instruction and `default_applied` as the initial sentinel occur).
+- **Exit-regex looseness:** `\b(done|stop)\b` matches anywhere in an answer ("I'm done gaming by 10pm" triggers early exit if the floor is met).
+- **Graph-mode edge case:** LangGraph `node_intake` is one-turn-only by design; if driven with an unlocked Brief whose questions are exhausted, `_route_after_intake` routes back to `node_intake` indefinitely (routing keys off `brief.status`, which nothing on that path locks). Unexercised in practice — every real graph entry (`run_from_brief`) supplies a locked Brief.
+- **Test coverage: none.** No test imports `node1_intake`; all fixtures are pre-built locked Briefs. Real intake has only ever been exercised manually. See §9.
 
-**Role:** Lightweight pre-Node-Two gate. Answers one question before two more nodes run: *can the user's requirements be built within their budget?* Produces a rough estimate — no inventory search, no part selection, no compatibility validation. Those are Node Three's job.
+### 2.2 Feasibility Check 🔒 🛠️ _(rewritten 2026-07-06 to match the as-built deterministic verdict; the original LLM-estimate design survives only as the Postgres-down fallback)_
+
+**Role:** Lightweight pre-Node-Two gate. Answers one question before two more nodes run: *can the user's requirements be built within their budget?* No part selection, no per-slot optimization — those are Node Three's job. Since 2026-07-02 the verdict is **deterministic and catalog-grounded**, not an LLM estimate.
 
 **Three steps:**
 
-1. **Requirements Resolver** — per `software` entry, look up base component floor (what GPU class, how much RAM, etc.), scale by the performance envelope (`resolution`, `framerate`, `hdr`), aggregate across the full workload:
+1. **Requirements Resolver** (`feasibility/resolver.py`, pure/deterministic) — per `software` entry, look up base component floor (what GPU class, how much RAM, etc.), scale by the performance envelope (`resolution`, `framerate`, `hdr`), aggregate across the full workload:
    - GPU tier, CPU tier, VRAM: **max** across software (peak demand wins).
    - Storage: **additive** (workloads stack their capacity needs).
-   - RAM: **max** single-app floor, plus a concurrency bump if two or more heavy workloads run simultaneously.
+   - RAM: **max** single-app floor, plus a concurrency bump (+16 GB stub) if two or more heavy workloads run simultaneously.
    - Hard constraints that raise the floor (e.g. SFF/ITX form factor, brand exclusions) are folded in here.
-   - Reused parts: their cost is zeroed; their constraints (socket, form factor) remain live.
+   - Reused parts: their cost is zeroed; their constraints (socket, form factor) remain live as `live_constraints` notes.
 
-2. **Scope aggregator** — add non-component line-items depending on `budget.scope`: monitor (if unowned and in scope), OS license, must-have peripherals. Subtract reused-part costs.
+2. **Scope aggregator** (`resolver.aggregate_scope`) — add non-component line-items depending on `budget.scope`: monitor (if unowned and in scope), OS license, must-have peripherals. Subtract reused-part costs. All fixed-cost values come from the shared `agents/costs.py` tables (single source with Node Two — the two stages cannot disagree on a cost).
 
-3. **LLM-assisted cost estimate** — the LLM receives the aggregated floor, the full budget picture, and **one live price anchor pulled from Postgres**: the current minimum catalog price for the binding component (almost always the GPU; sometimes CPU for heavy compute workloads). The LLM reasons about the rest from general knowledge of Indian PC part pricing and returns a verdict with a brief reason.
+3. **Deterministic catalog-floor verdict** (`feasibility/estimate.py` + `feasibility/catalog_floor.py`) — the primary path when Postgres is reachable:
+   - `compute_catalog_floor(brief, req)` brute-forces the **cheapest complete, compatible, in-stock build** that meets every resolved requirement floor, producing a **hard floor** (brand preferences honoured) and a **soft floor** (brand preferences relaxed).
+   - The floor is compared against the core component pool from `costs.core_pools(brief)`; the verdict is pure arithmetic: floor > ceiling → `impossible`; floor > `_TIGHT_RATIO` (= 0.85, empirically calibrated via `scripts/calibration_sweep.py`) × target → `tight`; otherwise `comfortable`.
+   - **The LLM writes prose only.** It narrates the deterministic result for the user; if its structured output tries to flip the verdict, the deterministic verdict is forcibly restored (`result.model_copy(update={"verdict": ...})`).
+   - **Fallback (Postgres down):** the original single-anchor LLM estimate — aggregated floor + budget picture + one live minimum-price anchor (cheapest GPU) — runs instead, flagged as such.
+   - **Provenance:** every `FeasibilityVerdict` carries `basis: deterministic | llm_fallback | stub`, so downstream consumers and logs can always tell a catalog-grounded verdict from an estimated one. (Not yet surfaced in the CLI's verdict printout — §9.)
 
 **Verdict — three-state 🔒:**
-- `comfortable` — budget has meaningful headroom above the estimated floor.
+- `comfortable` — budget has meaningful headroom above the catalog floor.
 - `tight` — buildable but little flexibility; expect compromises.
-- `impossible` — floor estimate materially exceeds the ceiling.
+- `impossible` — floor materially exceeds the ceiling.
 
 **Routing:** `comfortable` or `tight` → proceed to Node Two. `impossible` → Type Two failure: surface to the user with the binding constraint and suggested adjustments (raise budget, lower resolution target, relax form-factor constraint, etc.). Node One Brief is re-entered if the user adjusts.
 
-**What this is not:** the Feasibility Check does not validate a complete build, does not search inventory, and does not pick parts. It is a rough gate — honest about the fact that it is an estimate.
+**What this is not:** the Feasibility Check does not run the Node Three funnel, does not rank or justify parts, and does not pick anything the user sees. The catalog floor is a min-cost existence proof, not a recommendation.
 
-**Known open items:** realistic-min buffer calibration; non-component cost estimates are currently rough; reused-parts compatibility stubs need PC-of-record data from `existing.existing_pc_build_id` (Brief Appendix A).
+**Open items (updated 2026-07-06):**
+- ~~Realistic-min buffer calibration~~ ✅ **RESOLVED** — the tight/comfortable boundary is the empirically calibrated `_TIGHT_RATIO = 0.85` (anchored between a 1.04-ratio tight case and a 0.82-ratio comfortable case; re-derivable any time stock shifts via `scripts/calibration_sweep.py`).
+- Non-component cost estimates remain rough hand-picked STUB values in `costs.py` (centralized, but not sourced from real pricing).
+- Reused-parts compatibility stubs: `existing.existing_pc_build_id` (PC-of-record) is consumed by nothing; reused-part value is a flat stub table; reused-part socket/form-factor constraints exist only as free-text notes — `min_viable_build` excludes reused slots without applying their constraints to the rest of the build.
 
-### 2.3 Node Two — Budget Allocation Agent 🔒
+### 2.3 Node Two — Budget Allocation Agent 🔒 🛠️
 
 - **Role:** Takes three deterministically compiled, server-side inputs, reasons across them, and outputs price bands per component. No other responsibility.
 
 **Deterministic pre-steps (before the agent runs):**
-1. Generate the shopping list by cross-referencing the brief's existing/reused parts against the full component list — only components that need to be purchased proceed.
-2. Subtract fixed costs (OS license, specified monitor, peripherals). Node Two only allocates the remaining **core-component pool**.
+1. Generate the shopping list by cross-referencing the brief's existing/reused parts against the full component list — only components that need to be purchased proceed (`_build_shopping_list`; `action == "keep"` slots are excluded).
+2. Subtract fixed costs (OS license, specified monitor, peripherals) via the shared `agents/costs.py` tables. Node Two only allocates the remaining **core-component pool**.
 
-> The Brief now carries these fixed-cost inputs explicitly — `operating_system`, `monitor`, and `peripherals` sections (Appendix A) — which the fixed-cost subtraction reads.
+> The Brief carries these fixed-cost inputs explicitly — `operating_system`, `monitor`, and `peripherals` sections (Appendix A) — which the fixed-cost subtraction reads.
 
 **Three inputs:**
-1. **Default allocation profile** — per-use-case skew predetermined by Karma Computers (gaming → GPU, editing → VRAM + storage, ML → RAM + GPU VRAM, programming → CPU + RAM).
+1. **Default allocation profile** — per-use-case skew predetermined by Karma Computers (gaming → GPU, editing → VRAM + storage, ML → RAM + GPU VRAM, programming → CPU + RAM). As built: `_ALLOCATION_PROFILES` STUB tables, including an ML sub-profile keyed off `sub_case`.
 2. **User brief** from Node One.
-3. **Software minimum specs** fetched at runtime via web search from authoritative sources (Steam, Epic Games, official vendor pages). Not stored in the knowledge graph.
+3. **Software minimum specs** — designed as runtime web search from authoritative sources (Steam, Epic Games, official vendor pages); **as built, a clearly-marked hardcoded STUB dict** (`_SOFTWARE_SPECS`). Web-search retrieval was never built (§10).
 
-> **Boundary:** Catalog price floors are *not* a Node Two input. If Node Three can't find a part within a band, it surfaces that to the user — not Node Two's concern.
+> **Boundary (amended 2026-07-02):** the original locked boundary — *"catalog price floors are not a Node Two input"* — was deliberately relaxed. A deterministic post-step, `_repair_bands_to_catalog`, pins each band to the corresponding min-viable-build part price from the shared catalog floor (`catalog_floor.py`), so Node Three's hard floor filter can never face a band that excludes every floor-meeting part. Allocation *reasoning* (the LLM weight skew) still never sees catalog prices; only the deterministic post-step does.
 
 **Output:** JSON price bands (low / mid / high in INR) per shopping-list component only. Constraints:
-- midpoints sum to the core budget target,
-- high ends sum to the ceiling,
-- low ends sum to the floor.
+- midpoints sum to the core budget target (**holds by construction**),
+- high ends sum to the ceiling (**holds by construction**),
+- low ends sum to the floor — **relaxed by design**: `_repair_bands_to_catalog` may raise individual `low` values to the catalog floor price, so the low-end sum can exceed the nominal floor.
 
 No rationale, flex flags, or metadata — Node Three has the full brief and derives intent itself. Node Three hunts for components clustered around the midpoints as the sweet spot.
 
-### 2.4 Node Three — Part Finder & Recommender 🔒
+### 2.4 Node Three — Part Finder & Recommender 🔒 🛠️
 
 **Selection sequence:** GPU → CPU → RAM → Storage → Motherboard → PSU → Case → Cooler → Fans.
 _(Motherboard is selected after the performance anchors are locked — it's a compatibility hub, not a constraint driver.)_
@@ -108,30 +123,32 @@ _(Motherboard is selected after the performance anchors are locked — it's a co
 
 ```mermaid
 flowchart LR
-    A[Catalog query<br/>price band + in-stock<br/>Postgres] --> B[Graph filter<br/>fitness threshold + compatibility<br/>vs locked parts · Neo4j]
-    B --> C[LLM final pick<br/>from shortlist of 5–7]
+    A[Catalog query<br/>price band + in-stock + requirement floor<br/>Postgres] --> B[Graph filter<br/>hard compatibility + soft fitness rank<br/>vs locked parts · Neo4j]
+    B --> C[LLM final pick<br/>from shortlist of ≤7]
 ```
 
-- **Fitness thresholds** are derived once upfront by the LLM reading the brief, stored in build state, and not re-derived per slot.
-- **Safeguards:**
-  - Relaxation ladder for empty shortlists (widen band → lower fitness threshold → escalate).
-  - Lookahead probes before locking anchor components to prevent downstream dead-ends.
-  - Running budget-pool tracking to catch drift across slots.
-  - Compatibility validator runs after every lock.
+- **Requirement-floor hard filter:** every catalog fetch goes through one choke point (`_fetch_floor`), which applies the shared `catalog_floor.slot_requirement_filter` predicate (GPU VRAM, CPU tier→min cores, RAM/storage capacity, storage type) and excludes `hard_constraints.rejected_parts`. The same predicate backs the feasibility verdict and Node Two's band repair — one predicate, three consumers, no drift on "meets floor". (Known residual drift: `rejected_parts` exclusion is applied in `_fetch_floor` but **not** inside `catalog_floor.min_viable_build` — §9.)
+- **Fitness is a soft ranking, never a cutoff.** `fitness_filter` orders candidates by benchmark tier/score (`FitnessRanking`); components below the derived threshold are ranked lower, not dropped, and `is_real_ranking` gates whether the LLM prompt mentions fitness at all (categories with no fitness edges get no fake signal). **Fitness thresholds** are derived once upfront by the LLM reading the brief (`gpt-4o`, `temperature=0`), stored in build state (`ThresholdCache`, round-tripped through graph state), and never re-derived per slot.
+- **Safeguards (as built):**
+  - **Relaxation ladder** for empty shortlists: price band → **widen band 20%** → **full catalog**. The requirement floor and hard compatibility survive every rung — only price relaxes. _(The originally designed "lower fitness threshold" rung no longer exists and cannot: fitness stopped being a filter when it became a soft rank.)_
+  - **Lookahead probe — one, warn-only:** after GPU+CPU lock, a single motherboard-compatibility probe runs (Neo4j only). It **logs a warning and proceeds** ("LLM will pick best available") — it does not block or backtrack. The design's "lookahead probes to prevent downstream dead-ends" (plural, preventive) is not what exists; treated as an open item (§9).
+  - Running budget-pool tracking (`remaining_budget` vs ceiling; `over_budget` dead-end) to catch drift across slots.
+  - **Post-lock compatibility validator — blocking:** runs after every lock and refuses to lock a conflicting part (surfaces a warning on the build card) rather than merely logging.
 - **Build state carries:** locked parts, derived thresholds, remaining budget, user brief.
-- **Output:** A single build (not multiple options). The **build card** is a human-readable summary of parts, prices, and justifications sent to the user for confirmation; product IDs are sent to the backend on confirmation.
+- **Output:** A single build (not multiple options). The **build card** is a human-readable summary of parts, prices, and justifications sent to the user for confirmation; product IDs are sent to the backend on confirmation. Dead-end slots produce plain-English `warnings` entries on the card.
 - **Failure communication:** plain English (e.g., "your budget cannot support this configuration; either lower demands or increase budget; the best available within constraints is X").
 
 **Refinement loop — Approach B (pin / open model):** 🛠️
 - All slots re-solve on each refinement; the compatibility validator surfaces conflicts conversationally rather than maintaining a dependency graph.
 - Budget-level changes are routed through the budget updater (re-run `allocate_budget` with the new budget, then re-solve).
 - Brief-level changes restart at Node One.
-- **As built (`node3_refinement.py`):** the conversation loop lives in `run_pipeline.py` (Phase 5, `run_refinement`); the module itself is pure and non-interactive. A freeform user message is parsed via `call_structured` into a `RefinementOps` — a **multi-op** classification (not a single action): `brief_edit`, `restart_trigger`, `budget_change`, `pin`, `reject`, `accept` may all populate in one turn (e.g. "bump budget to 90k and give me an nvidia card" → `budget_change` + `reject`).
+- **As built and wired (`node3_refinement.py` + `run_pipeline.py` Phase 5, `run_refinement`):** the conversation loop lives in the CLI harness; the module itself is pure and non-interactive. The loop runs on every interactive and single-`--fixture` invocation (`--fixture-all` stops after allocation). **It is not a LangGraph node** — `graph_runner.run_from_brief` ends at a build card with no refinement capability, which is the standing gap for the future API layer (§9). A freeform user message is parsed via `call_structured` into a `RefinementOps` — a **multi-op** classification (not a single action): `brief_edit`, `restart_trigger`, `budget_change`, `pin`, `reject`, `accept` may all populate in one turn (e.g. "bump budget to 90k and give me an nvidia card" → `budget_change` + `reject`).
   - **Field routing** (`route_field_edit`) is a fixed, hardcoded table — never an LLM judgment call: `software` / `performance` / `extras` / `physical` / `longevity` → **additive** (`brief_edit`); `primary_use_case` / `budget.scope` / `existing.reuse_parts` → **structural** (`restart_trigger`). A field outside the table defaults to additive with a logged warning, never a crash. The table decides routing even if the LLM puts a structural field name in `brief_edit` (or vice versa).
   - **List-valued additive fields merge, not replace:** `software` is upserted by name (`_merge_list_field`) rather than overwritten wholesale, since the LLM classifying one turn only sees that turn's message — asking it to echo the full existing list back would risk silently dropping entries it didn't mention.
-  - **Dispatch precedence**, fixed per turn: `restart_trigger → brief_edit → budget_change → pin/reject → re-solve → accept`. `restart_trigger` patches the brief and calls `graph_runner.run_from_brief`, skipping every other op that turn; `locked_parts` and `rejected_parts` persist across it. `brief_edit` patches the brief and re-runs `estimate_feasibility` only (not full Node One) — an `impossible` verdict skips the re-solve. `budget_change` rescales `comfortable_min/max` proportionally, sets the new ceiling, and re-runs `allocate_budget`. `pin` records `locked_parts[slot] = product_id`; `reject` appends a `RejectedPart` and unpins that slot if it was pinned. Any of the above triggers one incumbent-biased re-solve (`_select_build_with_pins` + `diff_and_bias`); `accept` (only reachable if nothing else fired) ships `build_card.product_ids`.
+  - **Dispatch precedence**, fixed per turn: `restart_trigger → brief_edit → budget_change → pin/reject → re-solve → accept`. `restart_trigger` patches the brief and calls `graph_runner.run_from_brief`, skipping every other op that turn; `locked_parts` and `rejected_parts` persist across it. `brief_edit` patches the brief and re-runs `estimate_feasibility` only (not full Node One) — an `impossible` verdict skips the re-solve. `budget_change` rescales `comfortable_min/max` proportionally, sets the new ceiling, and re-runs `allocate_budget`. `pin` records `locked_parts[slot] = product_id`; `reject` (`apply_reject`) appends a `RejectedPart` and unpins that slot if it was pinned. Any of the above triggers one incumbent-biased re-solve (`_select_build_with_pins` + `diff_and_bias`); `accept` (only reachable if nothing else fired) ships `build_card.product_ids`.
   - **`diff_and_bias`** reconciles a fresh re-solve against the prior card: for each non-pinned slot whose pick changed, it keeps the OLD part if still valid (in the widened price band, not rejected, compatible with parts decided so far) — otherwise the new pick wins. Only genuine changes land in `BuildCard.changed_slots` (`{slot, old_product_id, new_product_id, reason}`), so the harness prints a diff instead of a full card each round.
   - `MAX_REFINEMENT_ROUNDS = 5`.
+  - **Test coverage boundary:** the pure-function layer (routing table, dispatch precedence, pin/reject round-trips, all four `diff_and_bias` cases, merge-preservation) is well tested offline (27 tests, LLM/DB/solve monkeypatched). `run_refinement` itself — the input loop, `ThresholdCache` threading across rounds, diff-vs-full-card display, MAX_ROUNDS — has no automated coverage, and no test exercises an un-mocked re-solve (§9).
 
 ---
 
@@ -139,7 +156,7 @@ flowchart LR
 
 **Two edge families:**
 1. **Compatibility family** — unweighted junction nodes. Components connect to shared spec nodes (sockets, chipsets) rather than directly to each other.
-2. **Fitness family** — weighted edges encoding how well a component serves a specific use case (gaming, video editing, music production, etc.).
+2. **Fitness family** — edges encoding how well a component serves a specific use case, carrying benchmark-derived `tier` and `score` properties.
 
 **Node taxonomy:** component · spec · use-case · performance · component-class.
 
@@ -149,12 +166,15 @@ flowchart LR
 
 **As built:**
 - `agents/db/neo4j_schema.py` — label constants (`COMPONENT`, `SPEC`, `USE_CASE`, `PERFORMANCE`, `COMPONENT_CLASS`), node-key constraints, indexes, and an idempotent `apply_schema(driver)`. Requires the **Enterprise** image (`neo4j:5-enterprise`, `NEO4J_ACCEPT_LICENSE_AGREEMENT=yes`) — Community fails silently on the first `NODE_KEY` constraint.
-- `data/graph/seed_graph.py` — populates the graph from the Postgres catalog using `MERGE` throughout (idempotent). Creates `:Component` nodes; `[:BELONGS_TO]` → `:ComponentClass`; compatibility junctions (`:Spec` nodes for socket / DDR-gen / form-factor, with cooler `socket_compat`, motherboard `ddr_support`, case + motherboard `form_factor`, all read from the catalog `specs` JSONB); weighted `[:GOOD_FOR {weight}]` → `:UseCase` edges; and `[:HAS_VRAM {gb}]` → `:Performance` for GPUs.
-- `agents/db/neo4j.py` — real parametrized Cypher (no f-strings): `compatibility_check(candidate_ids, locked_parts, candidate_slot)`, `fitness_filter(candidate_ids, use_case, threshold)` (fail-open — components with no `:GOOD_FOR` edge are kept, not dropped), `get_component_fitness(product_id, use_case)`, and `ping()` for availability detection.
+- `data/graph/seed_graph.py` — populates the graph from the Postgres catalog using `MERGE` throughout (idempotent). Creates `:Component` nodes; `[:BELONGS_TO]` → `:ComponentClass`; compatibility junctions (`:Spec` nodes for socket / DDR-gen / form-factor, with cooler `socket_compat`, motherboard `ddr_support`, case + motherboard `form_factor`, all read from the catalog `specs` JSONB); `[:GOOD_FOR]` → `:UseCase` edges for GPU and CPU; and `[:HAS_VRAM {gb}]` → `:Performance` for GPUs.
+- `data/graph/seed_fitness_benchmarks.py` — seeds real benchmark-derived `tier` + `score` onto `GOOD_FOR` edges from `data/benchmarks/gpu_benchmarks.csv` / `cpu_benchmarks.csv`.
+- `agents/db/neo4j.py` — real parametrized Cypher (no f-strings): `compatibility_check(candidate_ids, locked_parts, candidate_slot)` (fail-open only for components absent from the graph), `fitness_filter(...)` returning a `FitnessRanking` (soft ordering — **never excludes**; `is_real_ranking` tells the caller whether any real fitness signal exists), `get_component_fitness(product_id, use_case)`, and `ping()` for availability detection.
 
-**Live and enforced:** a Neo4j instance (Enterprise edition, local Docker) is stood up and seeded (103 products, 9 `ComponentClass`, 9 `Spec`, 5 `UseCase`, 4 `Performance` nodes + relationships); Node 3 detects it via `ping()`. All **three compatibility families — socket (CPU↔motherboard, cooler↔CPU), DDR generation (motherboard↔RAM), form factor (case↔motherboard)** — are hard-filtered: never bypassed by the price-band relaxation ladder, verified bidirectionally end-to-end. Node 3 additionally hard-filters the *resolved requirement floor* (VRAM / CPU tier / RAM & storage capacity / storage type) at the same catalog-query layer — see `agents/feasibility/catalog_floor.py`.
+**Live and enforced (verified against the running instance, 2026-07-06):** Enterprise edition, local Docker, seeded — 103 `:Component`, 9 `:ComponentClass`, 9 `:Spec`, 5 `:UseCase`, 4 `:Performance` nodes (matching the 103-product / 9-category Postgres catalog); Node 3 detects it via `ping()`. All **three compatibility families — socket (CPU↔motherboard, cooler↔CPU), DDR generation (motherboard↔RAM), form factor (case↔motherboard)** — are hard-filtered: never bypassed by the price-band relaxation ladder, verified bidirectionally end-to-end. Node 3 additionally hard-filters the *resolved requirement floor* (VRAM / CPU tier / RAM & storage capacity / storage type) at the same catalog-query layer — see `agents/feasibility/catalog_floor.py`.
 
-**Still open:** the `[:GOOD_FOR]` weights are a clearly-marked **STUB** table in `seed_graph.py` (sensible defaults, e.g. GPU→gaming 0.9, CPU→work 0.9) — real benchmark-sourced weights and the precise weight rubric remain deferred; this is unrelated to the compatibility enforcement above. Neo4j runs local Docker only — not yet migrated to a hosted instance reachable by a deployed backend (see §9).
+**Fitness coverage (as seeded):** `GOOD_FOR` edges exist for **GPU (42 edges: 14 parts × gaming / content_creation / general_use — work_productivity deliberately absent) and CPU (48 edges: 12 parts × 4 use-cases)**, all carrying benchmark `tier` + `score`. The other seven categories (RAM, storage, motherboard, PSU, case, cooler, fans) have **zero fitness edges by design** — the earlier hand-picked stub weights for RAM/STORAGE were removed (2026-07-06) because fake signal is worse than none; `is_real_ranking` keeps those slots' LLM prompts silent about fitness. The GPU/CPU edges still also carry the legacy stub `weight` property (`seed_graph._GOOD_FOR_WEIGHTS` writes it; nothing reads it — inert).
+
+**Still open:** extending real fitness beyond GPU/CPU (or formally deciding not to); `derive_fitness_thresholds` still spends a `gpt-4o` call producing thresholds for all nine slots when only two are usable. Neo4j runs local Docker only — not yet migrated to a hosted instance reachable by a deployed backend (see §9).
 
 ---
 
@@ -162,11 +182,11 @@ flowchart LR
 
 | Stage | Produces | Shape / notes |
 |---|---|---|
-| Node One | User Build Brief | JSON; budget + primary use case mandatory; now also carries software/workload, monitor, peripherals, storage, OS, existing/reused parts, and pinned `hard_constraints` — full schema in **Appendix A** |
-| Feasibility Check | verdict + reason | `comfortable \| tight \| impossible`; comfortable/tight → proceed to Node Two; impossible → surface to user with binding constraint + suggested adjustments |
-| Node Two pre-steps | shopping list + core budget pool | deterministic; fixed costs already subtracted |
-| Node Two | price bands | JSON low/mid/high INR per shopping-list component |
-| Node Three | build card | human-readable summary; product IDs sent to backend on confirm |
+| Node One | User Build Brief | JSON; budget + primary use case mandatory; also carries software/workload, monitor, peripherals, storage, OS, existing/reused parts, and pinned `hard_constraints` — full schema in **Appendix A** |
+| Feasibility Check | verdict + reason + basis | `comfortable \| tight \| impossible`, `basis: deterministic \| llm_fallback \| stub`; comfortable/tight → proceed to Node Two; impossible → surface to user with binding constraint + suggested adjustments |
+| Node Two pre-steps | shopping list + core budget pool | deterministic; fixed costs already subtracted (shared `costs.py`) |
+| Node Two | price bands | JSON low/mid/high INR per shopping-list component; post-repaired to the catalog floor |
+| Node Three | build card | human-readable summary + `warnings` + `changed_slots`; product IDs sent to backend on confirm |
 
 ---
 
@@ -185,19 +205,20 @@ flowchart LR
 |---|---|
 | Conversation-first intake over guided wizard | Build-requirement space is combinatorial (can't enumerate branches); conversation is the agentic thesis; reversible since both modes emit the identical Brief, so a wizard can be added later as additive UI. |
 | Structured questions, freeform paragraph answers | Keeps conversational feel while bounding each turn's scope — easier extraction, cleaner state, lower token use than reverse-engineering one long dump. |
-| Static (non-branching) question set | Answers drive downstream nodes, not which questions are asked; avoids the wizard's hand-authored branch explosion. Only exception is ask-if-ambiguous clarifications. |
+| Static (non-branching) question set | Answers drive downstream nodes, not which questions are asked; avoids the wizard's hand-authored branch explosion. (Ask-if-ambiguous clarifications were the designed exception; not yet built.) |
 | Budget + primary use case as the proceed floor | With those two a build estimate is possible; they're the gate to proceed. Everything else is the rest of one fixed pre-prepared set, asked in full unless the user says "done" / "stop" (no arbitrary question cap). |
 | Hard constraints captured via a final open-ended question + pinned block | Non-negotiables (no-RGB, SFF, brand bans) live in structured pinned state separate from the prose summary, so they survive compaction and are never re-suggested. |
 | Node One does no feasibility/contradiction check | It has no tier/benchmark data; its only jobs are asking and forming valid JSON. Feasibility Check is the arbiter. |
 | Motherboard selected after GPU/CPU/RAM | Prevents over-constraining the build; the board adapts to anchors rather than driving them. |
 | Fitness thresholds derived once upfront | Avoids redundant per-slot LLM calls; thresholds live in build state. |
+| Fitness is a soft rank, never a hard cutoff *(2026-07-05, supersedes the threshold-as-filter design)* | A hard fitness gate silently emptied shortlists and interacted badly with the relaxation ladder; ranking preserves the signal without ever costing a viable build. `is_real_ranking` keeps categories with no fitness data honest (no fabricated signal in the pick prompt). |
 | Product-level graph nodes | Board-partner variants of the same chip differ enough in real-world performance to warrant individual nodes. |
-| Catalog price floors excluded from Node Two | Allocation reasoning is Node Two's job; finding parts within bands is Node Three's. |
+| ~~Catalog price floors excluded from Node Two~~ **Superseded (2026-07-02): deterministic band repair against the catalog floor** | Original boundary kept allocation reasoning pure, but bands that exclude every floor-meeting part guarantee Node Three dead-ends. The LLM skew still never sees catalog prices; a deterministic post-step (`_repair_bands_to_catalog`) pins bands to the min-viable-build prices, sharing the exact floor predicate with feasibility and Node Three so the three stages cannot drift. |
 | Neo4j over Postgres for compatibility | Same-semantic-space traversal is worth the architectural simplicity; weightless edges are still valid graph relationships. |
 | RAG over fine-tuning | Fine-tuning can't track volatile daily Indian pricing, goes stale on hardware launches, and is a black box. |
-| Feasibility Check is LLM-assisted, not LLM-free | Pure determinism would require a complete inventory search to price the floor accurately — that is Node Three's job, not a gate's. An LLM call with one live Postgres price anchor (cheapest binding component) is fast, honest about being a rough estimate, and avoids pulling inventory logic into the wrong stage. |
-| Feasibility Check does not search inventory | Finding and validating parts is Node Three's responsibility. The gate only answers "is this roughly buildable in budget?" — not "which parts?" Keeping the boundary clean prevents two nodes doing the same work. |
-| One live price anchor (Postgres) injected into the LLM prompt | Indian PC pricing is volatile. The GPU — the most expensive and most volatile component — is anchored to the current catalog minimum price so the estimate doesn't go stale on the one number that matters most. Everything else the LLM reasons about from general knowledge. |
+| ~~Feasibility Check is LLM-assisted, not LLM-free~~ **Superseded (2026-07-02): deterministic catalog-floor verdict, LLM prose-only** | The original argument (pure determinism would require an inventory search) dissolved once `catalog_floor.py` existed anyway for band repair — the min-cost existence proof is cheap and already shared. LLM verdicts were unfalsifiable and drifted run-to-run; a deterministic verdict is reproducible, calibratable (`calibration_sweep.py`), and the LLM still writes the user-facing prose. The single-anchor LLM estimate survives as the Postgres-down fallback. |
+| Feasibility Check does not search inventory *(nuanced 2026-07-02)* | Still true in spirit: the gate never runs the Node Three funnel, never ranks or justifies parts. It does now compute a min-cost existence proof over the catalog — but that is an aggregate floor, not a recommendation, and it reuses Node Three's own floor predicate rather than duplicating selection logic. |
+| One live price anchor (Postgres) injected into the LLM prompt | Retained for the fallback path only: when Postgres is down (no anchor possible, so this applies to historical context) or in the legacy estimate path, the GPU anchor kept the estimate from going stale on the one number that matters most. |
 | Supabase as managed Postgres host (not full BaaS) | Fastify handles the API layer, Prisma the ORM. Does not replace Neo4j, Redis, or Meilisearch. |
 
 ---
@@ -218,7 +239,7 @@ Node 1 does **not** own the conversation loop. The CLI harness (`run_pipeline.py
 - `extract_turn(answer, brief, history)` — runs LLM extraction for one turn and returns the updated Brief.
 - `newly_filled_sections(old_brief, new_brief)` — diff helper for reporting what changed.
 
-This keeps Node 1 stateless and independently testable.
+This keeps Node 1 stateless and independently testable — though note that no automated test currently exercises it (§9).
 
 ### 7.3 LLM Arithmetic Constraint — Locked Decision 🔒
 
@@ -226,9 +247,9 @@ Asking the LLM to produce exact INR band values across nine component slots fail
 
 **Locked pattern:** the LLM produces **relative weights only** → Python computes INR values deterministically using **largest-remainder normalization** on 500-INR tokens. Sums hold by construction, not by asking the LLM to do arithmetic. `_distribute()` and `_compute_bands()` in `node2_allocation.py` implement this.
 
-### 7.4 Feasibility Check — Live Price Anchor
+### 7.4 Feasibility Check — Live Price Anchor (fallback path only, since 2026-07-02)
 
-One live Postgres price anchor (cheapest in-stock GPU from the catalog) is injected into the LLM prompt. Without it, verdicts are pessimistic — the model over-estimates GPU cost using stale priors.
+The single live Postgres price anchor (cheapest in-stock GPU) now matters only on the **`llm_fallback`** path — the primary verdict is deterministic (§2.2) and reads the whole catalog, not one anchor. Historical rationale retained: without the anchor, fallback verdicts are pessimistic — the model over-estimates GPU cost using stale priors.
 
 - The Supabase **direct host** (`db.<ref>.supabase.co`) is retired; the **Session Pooler URL** must be used.
 - `get_min_catalog_price` returns `0` on DB failure; `estimate.py` flags the anchor as `UNAVAILABLE` in the prompt and continues rather than aborting.
@@ -250,41 +271,48 @@ DESIGN.md defines the proceed floor as *budget + primary_use_case*. The implemen
 
 ---
 
-## 8. Phase 2 Implementation Notes 🛠️
+## 8. Phase 2–4 Implementation Notes 🛠️
 
 ### 8.1 Node 3 — Part Finder (as built)
 
 `agents/nodes/node3_selector.py` implements the three-step funnel:
 
-- `derive_fitness_thresholds(brief)` — **one** upfront `call_structured` call returning a per-slot threshold dict (stored in build state, never re-derived per slot). This call uses a **stronger model** (`gpt-4o` via `KARMA_THRESHOLD_MODEL`) because the per-slot reasoning quality drives every downstream pick; the per-slot final pick stays on `gpt-4o-mini`.
-- `select_part(slot, band, brief, locked_parts, fitness_thresholds, neo4j_available)` — Step 1 Postgres `get_parts_in_band` (with one 20%-band-widening retry on empty); Step 2 Neo4j `compatibility_check` then `fitness_filter` (skipped when `neo4j_available` is False); Step 3 `call_structured` final pick from a shortlist capped at 7.
-- `select_build(brief, price_bands)` — walks `SELECTION_ORDER` (GPU → CPU → RAM → Storage → Motherboard → PSU → Case → Cooler → Fans), skips `reuse_parts` with `action == "keep"`, tracks running budget, runs a motherboard lookahead probe after GPU+CPU lock, and re-validates compatibility after each lock.
-- **Graceful degradation (verified):** with Neo4j down *and* Postgres unreachable, `select_build` walks all nine slots, never crashes, and returns an empty `BuildCard` (every slot `None`). This is the designed degraded path — the funnel is structurally correct; only live data is missing.
+- `derive_fitness_thresholds(brief)` — **one** upfront `call_structured` call returning a per-slot threshold dict (stored in build state as `ThresholdCache`, never re-derived per slot). This call uses a **stronger model** (`gpt-4o` via `KARMA_THRESHOLD_MODEL`, `temperature=0`) because the per-slot reasoning quality drives every downstream pick; the per-slot final pick stays on `gpt-4o-mini`. Determinism levers not yet pulled: no `seed=`, no `system_fingerprint` logging (§9).
+- `select_part(...)` — Step 1: Postgres fetch through the `_fetch_floor` choke point (band + in-stock + requirement floor + rejected-parts exclusion), escalating band → +20% widen → full catalog on empty; Step 2: Neo4j `compatibility_check` (hard) then `fitness_filter` (soft rank; skipped when `neo4j_available` is False); Step 3: `call_structured` final pick from a shortlist capped at 7, falling back to the top-ranked candidate on a hallucinated `product_id`.
+- `select_build(brief, price_bands)` — walks `SELECTION_ORDER` (GPU → CPU → RAM → Storage → Motherboard → PSU → Case → Cooler → Fans), skips `reuse_parts` with `action == "keep"`, tracks running budget, runs the (warn-only) motherboard lookahead probe after GPU+CPU lock, and runs the **blocking** compatibility validator after each lock.
+- **Graceful degradation (verified):** with Neo4j down *and* Postgres unreachable, `select_build` walks all nine slots, never crashes, and returns an empty `BuildCard` (every slot `None`). This is the designed degraded path — the funnel is structurally correct; only live data is missing. Note this failure is **silent, not loud** — check `scripts/test_db_connection.py` first when builds look empty.
 
 ### 8.2 LangGraph Wiring
 
-`agents/graph.py` compiles a `StateGraph` matching the §1 flowchart: `node_intake → node_feasibility → {node_allocate → node_select → END | node_surface_failure → END}`, with conditional routing on the feasibility verdict. All node imports are **defensive** (`try/except ImportError`) so the graph compiles even if a downstream module is absent. `node_intake` is **one turn only** — designed for checkpointer resumption; the conversation loop still lives in `run_pipeline.py`, which remains the CLI driver. `agents/graph_runner.py` exposes `run_from_brief(brief, price_bands) -> PipelineState` for fixture/API invocation, pre-seeding state and entering at `node_feasibility`. This is the entry point the future API layer will call.
+`agents/graph.py` compiles a `StateGraph` matching the §1 flowchart: `node_intake → node_feasibility → {node_allocate → node_select → END | node_surface_failure → END}`, with conditional routing on the feasibility verdict. **The refinement loop is not a graph node** — it lives in `run_pipeline.py` Phase 5 (§2.4, §9). All node imports are **defensive** (`try/except ImportError`) so the graph compiles even if a downstream module is absent. `node_intake` is **one turn only** — designed for checkpointer resumption; the conversation loop still lives in `run_pipeline.py`, which remains the CLI driver. `node_select` rehydrates the `ThresholdCache` from graph state, so thresholds derived pre-graph are never re-derived inside it. `agents/graph_runner.py` exposes `run_from_brief(brief, price_bands) -> PipelineState` for fixture/API invocation, pre-seeding state and entering via the locked-brief route. This is the entry point the future API layer will call — with the caveat that it terminates at the build card (no refinement) until refinement is reachable outside the CLI.
 
-`PipelineState` (`agents/state/pipeline_state.py`) was extended with `fitness_thresholds`, `locked_parts` (string slot names → product_id), `remaining_budget`, and `error_message`. **Note:** `locked_parts` keys are **string slot names**, not `ComponentSlot` enums, to keep the graph-state contract serializable.
+`PipelineState` (`agents/state/pipeline_state.py`) carries `fitness_thresholds`, `locked_parts` (string slot names → product_id), `remaining_budget`, and `error_message`. **Note:** `locked_parts` keys are **string slot names**, not `ComponentSlot` enums, to keep the graph-state contract serializable.
 
 ### 8.3 Output Formatter
 
-`agents/output/formatter.py` centralizes all user-facing text: `format_build_card`, `format_price_bands` (byte-identical to the harness's inline printer, a drop-in import), `format_impossible` (numbered adjustment list), and `format_tight_warning`. Not yet wired into `run_pipeline.py` — that's a one-import swap remaining.
+`agents/output/formatter.py` centralizes user-facing text: `format_build_card` (**wired** into `run_pipeline.py`), `format_price_bands` (byte-identical to the harness's inline printer — the swap is still pending; `_print_price_bands` remains inline), `format_impossible` (numbered adjustment list), and `format_tight_warning`.
 
-### 8.4 Integration Test Suite
+### 8.4 Test Suite (audited 2026-07-06)
 
-`tests/test_pipeline_integration.py` + `conftest.py` (pytest). Deterministic allocation-sum assertions pass for all three fixtures (mids→target, highs→ceiling, exact by construction); storage-exclusion and fixed-cost checks pass. Feasibility tests **skip cleanly** when Postgres is unavailable via a `db_available` session fixture. Current result: **8 passed, 2 skipped**.
+**40 passed, 0 skipped** against live Postgres + Neo4j (`pytest tests/`, ~24s). Composition:
+
+- `test_pipeline_integration.py` (10) — feasibility verdicts + allocation-sum/slot/skew assertions across the three canonical fixtures; live Postgres; skips cleanly via the `db_available` session fixture when the DB is down.
+- `test_node3_selector.py` (2) — `_fetch_floor` rejected-parts exclusion + slot-scoping, live.
+- `test_graph_node_select.py` (1) — `ThresholdCache` graph-state round-trip (mocked `select_part`).
+- `test_node3_refinement.py` (27) — routing table, dispatch precedence, pin/reject, `diff_and_bias`, list-merge preservation; fully offline (LLM/DB/solve monkeypatched).
+
+**Coverage boundaries (what no test touches):** Node 1 intake (zero tests), an un-mocked `select_part`/`select_build` run, `run_refinement`'s harness loop, `run_from_brief`, and any end-to-end flow — see §9. `scripts/calibration_sweep.py` provides rerunnable ground-truth calibration of verdict/allocation/floor against live stock, but its Node-3 walk is an explicit cheapest-pick **proxy**, not the real funnel.
 
 ### 8.5 Model Allocation Policy 🔒
 
 | Call | Model | Reason |
 |---|---|---|
 | Node 1 extraction | `gpt-4o-mini` | Schema-constrained, prompt does the work |
-| Feasibility verdict | `gpt-4o-mini` | Single verdict, well-prompted |
+| Feasibility prose (verdict is deterministic) | `gpt-4o-mini` | Narration only; verdict cannot be flipped by the LLM |
 | Node 2 allocation skew | `gpt-4o-mini` | Weights only; Python does the math |
-| **Node 3 fitness thresholds** | **`gpt-4o`** | Multi-slot reasoning; quality drives all picks |
+| **Node 3 fitness thresholds** | **`gpt-4o`**, `temperature=0` | Multi-slot reasoning; quality drives all picks |
 | Node 3 final part pick | `gpt-4o-mini` | Constrained shortlist with explicit specs |
-| Node 3 refinement parse | `gpt-4o-mini` | Freeform → structured action |
+| Node 3 refinement parse | `gpt-4o-mini` | Freeform → structured multi-op |
 
 Rule of thumb: tasks requiring **reasoning about tradeoffs across multiple dimensions without explicit scaffolding** get `gpt-4o`; **schema-constrained or prompt-scaffolded** tasks stay on `gpt-4o-mini`.
 
@@ -292,42 +320,57 @@ Rule of thumb: tasks requiring **reasoning about tradeoffs across multiple dimen
 
 ## 9. Open Questions / On the Horizon 🚧
 
-**Completed since last revision** (moved out of this list): Neo4j schema + seed script, Cypher query patterns, Node 3 selection funnel, Node 3 refinement loop, LangGraph wiring, output formatter, integration test suite.
+_Rewritten 2026-07-06 from the full-system audit — every prior entry re-verified against source and live DB state._
 
-**Immediate (environment, not code):**
-- ~~**Supabase connection**~~ ✅ RESOLVED — `POSTGRES_URL` uses the Session Pooler URL; verified live via `python -m scripts.test_db_connection`.
-- ~~**Stand up + seed Neo4j**~~ ✅ RESOLVED — Enterprise edition, local Docker, seeded; all three compatibility families enforced (§3). Remaining: migrate off local Docker to a backend-reachable hosted instance (e.g. Aura) — infra is not yet reachable by a deployed backend.
+**Completed since last revision** (moved out of this list): deterministic feasibility verdict + `basis` provenance field, `_TIGHT_RATIO` buffer calibration (was "realistic-min buffer calibration"), Node 2 catalog band repair, fitness softgate + benchmark tier/score seeding (GPU/CPU), refinement loop wiring into `run_pipeline.py` Phase 5 (was "call refinement_loop after select_build"), Neo4j stand-up + seed + three-family enforcement, Supabase Session Pooler migration.
 
-**Small wiring remaining:**
-- Swap `run_pipeline.py`'s inline price-band printer for `agents.output.formatter.format_price_bands`.
-- Call `refinement_loop` after `select_build` in `run_pipeline.py` before final confirmation.
+**Correctness gaps (verified in code; not hygiene — each one changes behaviour or crashes):**
+- **(a) No end-to-end test exists.** Nothing automated runs intake → feasibility → allocation → real (un-mocked) selection → ≥1 refinement op → accept in one continuous flow. Node 1 intake has zero test coverage of any kind; no test calls `select_build` or `run_from_brief` un-mocked; `run_refinement`'s harness loop is untested. The closest artifact is a *manual* `python run_pipeline.py --fixture ...` run. This is the single most important gap in the system.
+- **(b) Refinement is unreachable from the API entry point.** `graph_runner.run_from_brief` — the designated future API surface — terminates at the build card; only the CLI harness reaches `dispatch_refinement`. An API layer wrapped around the graph today would ship builds with no pin/reject/re-solve capability.
+- **(c) PSU wattage is enforced by the feasibility floor but not by Node 3.** `catalog_floor.py` applies a `_PSU_HEADROOM_W = 150` sizing rule when computing the min-viable build; Node 3 has no PSU-sizing compatibility family, so the gate can pass on a PSU the selector will never be forced to match. One consumer of the shared floor logic enforces a rule the downstream consumer ignores.
+- **(d) `rejected_parts` exclusion has drifted across the shared-floor consumers.** Node 3's `_fetch_floor` excludes rejected parts; `catalog_floor.min_viable_build` does not — so a rejected part can still anchor the feasibility verdict and Node 2's band repair while being unselectable in Node 3. Small today, but it breaks the "one predicate, three consumers, no drift" invariant the floor architecture exists to guarantee.
+- **(e) `agents/db/postgres.py` never calls `load_dotenv()` — a real crash risk in the primary catalog client, not a hygiene nit.** It reads `os.environ["POSTGRES_URL"]` bare, so any entry point that imports it before a dotenv-loading module (a new script, a REPL session, a future API worker) dies with `KeyError: 'POSTGRES_URL'` at pool creation. It currently works only by import-order luck: `neo4j.py`, `llm/client.py`, and both scripts load `.env` first. Verified 2026-07-06: postgres.py is the **only** env-reading module in the codebase without `load_dotenv()` — fixing this one file closes the class.
 
-**Still genuinely open:**
-- **Fitness weights (❓):** precise decimals vs coarse buckets? Scope `good_for` weights to use-case alone, or use-case + resolution-tier pairs? Current values are STUB defaults in `seed_graph.py`; real benchmark sourcing pending.
-- **Business-intelligence ranking layer (§5):** hidden margin/overstock weighting injected into Node 3's final-pick prompt; admin-configurable weights. Designed, not built — first real Phase 3 task.
-- **API layer:** `graph_runner.run_from_brief` is ready; needs a Fastify/FastAPI wrapper to expose it as an endpoint.
-- **Feasibility Check — remaining open items:** realistic-min buffer calibration (headroom separating tight from comfortable); non-component cost estimates (currently rough STUB floor values); reused-parts compatibility stubs (need PC-of-record data from `existing.existing_pc_build_id`).
-- **Node One retry policy:** exact malformed/non-conformant retry count and escalation path — deferred to testing.
+**Environment / infra:**
+- **Neo4j hosted migration:** Enterprise local Docker only — not reachable by a deployed backend (e.g. Aura migration). Standing pre-production blocker.
+- **API layer:** `graph_runner.run_from_brief` is the ready entry point; needs a Fastify/FastAPI wrapper — and a refinement path (item b) to be product-complete.
+
+**Small wiring / hygiene (verified still open):**
+- Swap `run_pipeline.py`'s inline `_print_price_bands` for `formatter.format_price_bands` (the `format_build_card` half of the §8.3 swap is done).
+- Surface `FeasibilityVerdict.basis` in the CLI verdict printout (field exists and is set everywhere; nothing displays it).
+- Remove the five stale `# TODO: Remove when X merges` fallback stubs in `run_pipeline.py` — every referenced module merged long ago.
+- Deduplicate `get_driver()` in `agents/db/neo4j.py` (defined twice, verbatim).
+- Delete or implement the empty `agents/harness/` and `agents/tools/` packages (bare `__init__.py`, referenced nowhere).
+- Node 1 dead spec surface: unused `_QuestionDef.is_final`; never-populated `open_questions`; never-set `inferred`/`skipped_by_user` source flags; exit-regex over-matching (`\b(done|stop)\b` anywhere in an answer); graph-mode `node_intake` routing loop on an unlocked, question-exhausted brief.
+
+**Still genuinely open (design questions):**
+- **Fitness beyond GPU/CPU (❓):** extend benchmark tier/score to more categories, or formally scope fitness to the two performance anchors? Until decided, `derive_fitness_thresholds` spends a `gpt-4o` call on nine slots of which seven are unusable; the legacy `weight` property seeded by `seed_graph.py` is inert and should be dropped from the seeder when this is settled.
+- **Ask-if-ambiguous clarifications (§2.1):** the one designed exception to the static question sequence; no mechanism exists.
+- **Node 3 lookahead:** the designed preventive probes vs the single warn-only motherboard probe that exists. A validator that only logs isn't enforcement — decide whether the probe should block/backtrack or be dropped from the design.
+- **Business-intelligence ranking layer (§5):** hidden margin/overstock weighting injected into Node 3's final-pick prompt; admin-configurable weights. Designed, not built.
+- **Feasibility remaining open items:** non-component cost estimates (rough STUB values in `costs.py`); reused-parts compatibility (PC-of-record via `existing.existing_pc_build_id` consumed by nothing; reused-part constraints not applied inside `min_viable_build`). `_TIER_MIN_CORES` in `catalog_floor.py` is a stub proxy for CPU tier.
+- **Threshold determinism, last lever:** `seed=` + `system_fingerprint` logging on the `gpt-4o` threshold call (temperature=0 alone does not guarantee reproducibility across backend fleets).
+- **Software-spec retrieval:** runtime web search (Steam/Epic/vendor pages) vs the current `_SOFTWARE_SPECS` stub dict.
 - **Context window management strategy:** flagged as its own dedicated session topic.
 
 ---
 
 ## 10. Tech Stack
 
-| Layer | Planned | As built (Phase 0–2) |
+| Layer | Planned | As built (Phase 0–4) |
 |---|---|---|
-| AI API | Anthropic Claude API (tool calling) | **OpenAI** `gpt-4o-mini` default, `gpt-4o` for fitness thresholds (`KARMA_THRESHOLD_MODEL`); shared wrapper in `agents/llm/client.py` |
-| Pipeline orchestration | — | **LangGraph** `StateGraph` (`agents/graph.py`) |
-| Relational DB / product catalog | Supabase (managed Postgres) | Supabase Postgres via `psycopg2` `ThreadedConnectionPool` (`agents/db/postgres.py`); **direct host retired → Session Pooler required** |
+| AI API | Anthropic Claude API (tool calling) | **OpenAI** `gpt-4o-mini` default, `gpt-4o` for fitness thresholds (`KARMA_THRESHOLD_MODEL`, temperature=0); shared wrapper in `agents/llm/client.py` |
+| Pipeline orchestration | — | **LangGraph** `StateGraph` (`agents/graph.py`); refinement loop in the CLI harness, not the graph |
+| Relational DB / product catalog | Supabase (managed Postgres) | Supabase Postgres via `psycopg2` `ThreadedConnectionPool` (`agents/db/postgres.py`); **direct host retired → Session Pooler required**; live: 103 products / 9 categories |
 | ORM | Prisma | not yet in the Python pipeline (raw SQL via psycopg2) |
-| API layer | Fastify | not yet built; `graph_runner.run_from_brief` is the ready entry point |
-| Knowledge graph | Neo4j | schema + client + seed implemented; **no live instance seeded yet** |
+| API layer | Fastify | not yet built; `graph_runner.run_from_brief` is the ready entry point (no refinement path yet — §9) |
+| Knowledge graph | Neo4j | **live**: Enterprise edition, local Docker, seeded (103 components; three compatibility families enforced; benchmark tier/score fitness on GPU/CPU); hosted migration pending |
 | Schema validation | — | **Pydantic v2** throughout |
 | Session / short-term memory | Redis | not yet wired |
 | Product search | Meilisearch | not yet wired |
 | ERP integration | Tally ERP via XML/ODBC | not yet wired |
 | Software specs retrieval | Runtime web search (Steam, Epic, vendor pages) | currently a clearly-marked STUB dict in Node 2 |
-| Testing | — | **pytest** integration suite (`tests/`) |
+| Testing | — | **pytest**: 40 tests (feasibility/allocation integration, `_fetch_floor` regressions, graph cache round-trip, offline refinement unit suite); no end-to-end test (§9) |
 
 ---
 
@@ -336,7 +379,7 @@ Rule of thumb: tasks requiring **reasoning about tradeoffs across multiple dimen
 The single structured artifact Node One emits and every downstream stage reads. A **living object**, re-filled in place on send-back / build-edit. **No prices stored.**
 
 **Conventions**
-- **Every field carries a `source` flag:** `user_stated | inferred | default_applied | skipped_by_user` — so any node can tell a real answer from an assumption, and re-engagement can target only `inferred` / `skipped` fields.
+- **Source flags:** `user_stated | inferred | default_applied | skipped_by_user` — so any node can tell a real answer from an assumption, and re-engagement can target only `inferred` / `skipped` fields. **As built:** the flag exists on four sections (`performance`, `monitor`, `storage`, `operating_system`), not every field; and only `user_stated` / `default_applied` are ever set in practice (§2.1 deviations).
 - **Field tiers:** `required` (blocks lock — the must-ask budget + primary use case), `ask_if_ambiguous`, `optional` (skippable → explicit default).
 - **Soft vs hard:** preference fields (purpose, physical, longevity, extras) are soft signals the LLM weighs; the `hard_constraints` block is non-negotiable, **pinned, and never compacted**.
 
@@ -345,7 +388,7 @@ The single structured artifact Node One emits and every downstream stage reads. 
 brief_id, user_id, chat_id, build_id, schema_version
 status: draft | locked | revisiting
 completeness: { required_complete: bool, optional_filled: int, optional_skipped: int }
-open_questions: [string]            # drives follow-ups
+open_questions: [string]            # drives follow-ups — NOTE: not yet populated by any code (§2.1)
 created_at, updated_at
 
 # 1 — Budget (REQUIRED)
@@ -408,7 +451,7 @@ operating_system:
 existing:
   has_existing_parts: yes | no
   reuse_parts: [ { slot, identifier, action: keep|replace } ]
-  existing_pc_build_id: uuid | null # PC-of-record for upgrades
+  existing_pc_build_id: uuid | null # PC-of-record for upgrades — NOTE: consumed by nothing yet (§2.2 open items)
   ecosystem_prefs: { cpu_brand_pref, gpu_brand_pref }   # SOFT
 
 # 10 — Physical & environment (optional → defaults)
@@ -443,7 +486,7 @@ hard_constraints:
 
 | Stage | Reads |
 |---|---|
-| Feasibility Check | budget, purpose, software, performance, hard_constraints (size/form-factor raise the floor) |
+| Feasibility Check | budget, purpose, software, performance, hard_constraints (size/form-factor raise the floor), existing (reuse zeroing) |
 | Node Two | budget, full purpose, software, performance, monitor + peripherals + OS (fixed-cost subtraction), existing.reuse_parts, longevity, hard_constraints |
 | Node Three | everything — esp. software, ecosystem_prefs, extras, connectivity, hard_constraints, rejected_parts, reuse_parts |
 
@@ -452,43 +495,71 @@ hard_constraints:
 - Required fields may be revised but are never null once locked.
 - `hard_constraints` accumulate across the session (append-only unless retracted) and are the one block guaranteed to survive compaction.
 - Editing a saved build seeds a fresh Brief from the build's `intent_snapshot` + part list.
-- A skipped optional field is recorded as `source: default_applied` (or `skipped_by_user`) — never silently assumed.
+- A skipped optional field is recorded as `source: default_applied` (or `skipped_by_user`) — never silently assumed. _(As built, `skipped_by_user` is never set — §2.1.)_
 
 ---
 
-## Appendix B — Repository Map (as built)
+## Appendix B — Repository Map (as built, 2026-07-06)
 
 ```
 karma ai/
-├── run_pipeline.py                 # CLI driver; owns the conversation loop; --fixture / --fixture-all
+├── run_pipeline.py                 # CLI driver; owns the conversation + refinement loops;
+│                                   #   --fixture / --fixture-all (fixture-all stops after allocation)
 ├── requirements.txt                # openai, langgraph, pydantic, psycopg2-binary, neo4j, ...
+├── DESIGN.md                       # this document
+├── docs/
+│   ├── context.md                  # session-state log (open items, resolutions)
+│   ├── lesson.md                   # post-mortem lessons
+│   └── plan.md                     # active plan (empty when no plan in flight)
 ├── agents/
 │   ├── llm/client.py               # call_structured / call_text / StructuredCallError (OpenAI wrapper)
-│   ├── graph.py                    # LangGraph StateGraph (karma_graph)
-│   ├── graph_runner.py             # run_from_brief(brief, price_bands) — API/fixture entry
+│   ├── graph.py                    # LangGraph StateGraph (karma_graph) — no refinement node
+│   ├── graph_runner.py             # run_from_brief(brief, price_bands) — API/fixture entry (ends at build card)
 │   ├── state/pipeline_state.py     # PipelineState TypedDict + new_state()
 │   ├── schemas/                    # source_flag, slots (ComponentSlot — canonical), brief,
-│   │                               #   feasibility, price_bands, build_card
+│   │                               #   feasibility (incl. basis), price_bands, build_card
+│   ├── costs.py                    # shared fixed-cost STUB tables + core_pools() — single source
+│   │                               #   for Node 2 + feasibility
 │   ├── nodes/
 │   │   ├── node1_intake.py         # blank_brief, floor_met, next_question, extract_turn, ...
-│   │   ├── node2_allocation.py     # allocate_budget; _distribute / _compute_bands (largest-remainder)
-│   │   ├── node3_selector.py       # derive_fitness_thresholds, select_part, select_build, SELECTION_ORDER
-│   │   └── node3_refinement.py     # RefinementOps, route_field_edit, dispatch_refinement, diff_and_bias
+│   │   ├── node2_allocation.py     # allocate_budget; _distribute / _compute_bands (largest-remainder);
+│   │   │                           #   _repair_bands_to_catalog
+│   │   ├── node3_selector.py       # derive_fitness_thresholds, select_part, select_build, _fetch_floor,
+│   │   │                           #   SELECTION_ORDER, ThresholdCache
+│   │   └── node3_refinement.py     # RefinementOps, route_field_edit, dispatch_refinement, apply_reject,
+│   │                               #   diff_and_bias (pure; loop lives in run_pipeline.py)
 │   ├── feasibility/
-│   │   ├── resolver.py             # resolve_requirements + aggregate_scope (deterministic)
-│   │   └── estimate.py             # estimate_feasibility (LLM + live Postgres price anchor)
+│   │   ├── resolver.py             # resolve_requirements + aggregate_scope (deterministic; STUB floor tables)
+│   │   ├── estimate.py             # estimate_feasibility — deterministic verdict primary,
+│   │   │                           #   LLM prose-only, llm_fallback path
+│   │   └── catalog_floor.py        # slot_requirement_filter + compute_catalog_floor / min_viable_build —
+│   │                               #   shared by estimate, band repair, Node 3 floor filter
 │   ├── db/
 │   │   ├── postgres.py             # PostgresClient, get_min_catalog_price, get_parts_in_band
-│   │   ├── neo4j.py                # ping, compatibility_check, fitness_filter, get_component_fitness
-│   │   └── neo4j_schema.py         # constraints + indexes + apply_schema
-│   └── output/formatter.py         # format_build_card / price_bands / impossible / tight_warning
+│   │   │                           #   (NOTE: no load_dotenv — §9 correctness gap e)
+│   │   ├── neo4j.py                # ping, compatibility_check, fitness_filter → FitnessRanking,
+│   │   │                           #   get_component_fitness
+│   │   └── neo4j_schema.py         # constraints + indexes + apply_schema (Enterprise required)
+│   ├── harness/                    # EMPTY package (bare __init__.py) — §9
+│   ├── tools/                      # EMPTY package (bare __init__.py) — §9
+│   └── output/formatter.py         # format_build_card (wired) / price_bands (swap pending) /
+│                                   #   impossible / tight_warning
 ├── data/
 │   ├── catalog/seed.sql            # catalog table (9 categories, INR prices, in_stock, specs JSONB)
-│   ├── fixtures/                   # budget_gamer / video_editor / ml_workstation (valid Briefs)
-│   └── graph/seed_graph.py         # seeds Neo4j from the Postgres catalog (idempotent MERGE)
-├── scripts/test_db_connection.py   # self-service Supabase connection + catalog verifier
-└── tests/                          # conftest.py + test_pipeline_integration.py + test_node3_selector.py
-                                     #   + test_graph_node_select.py + test_node3_refinement.py (pytest)
+│   ├── benchmarks/                 # gpu_benchmarks.csv + cpu_benchmarks.csv (fitness tier/score source)
+│   ├── fixtures/                   # budget_gamer / video_editor / ml_workstation (canonical)
+│   │                               #   + high_end_gamer + edge_intel_gamer / edge_tight_amd /
+│   │                               #   edge_floor_violating_cheapest / edge_floor_at_band_low
+│   └── graph/
+│       ├── seed_graph.py           # seeds Neo4j from the Postgres catalog (idempotent MERGE)
+│       └── seed_fitness_benchmarks.py  # seeds GOOD_FOR tier/score from benchmark CSVs (GPU + CPU)
+├── scripts/
+│   ├── test_db_connection.py       # self-service Supabase connection + catalog verifier
+│   └── calibration_sweep.py        # ground-truth sweep: verdict/allocation/floor vs live stock
+│                                   #   (Node-3 walk is a cheapest-pick PROXY, not select_build)
+└── tests/                          # conftest.py (db_available) + test_pipeline_integration.py (10)
+                                    #   + test_node3_selector.py (2) + test_graph_node_select.py (1)
+                                    #   + test_node3_refinement.py (27) — 40 total; no E2E (§9)
 ```
 
 **Git workflow:** feature branches `phase{N}/feature-name`, conventional commits, PRs merged to `main`. Always stage with specific paths (`git add "karma ai/agents/..."`), never `git add .` — the repo root accumulates Node/`__pycache__`/stray files that `.gitignore` now covers. Always merge with `git merge <branch> -m "..."` to avoid the editor opening.
