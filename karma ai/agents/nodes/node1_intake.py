@@ -491,8 +491,35 @@ def newly_filled_sections(
     return filled
 
 # ---------------------------------------------------------------------------
-# next_question()
+# next_question_id() / next_question()
 # ---------------------------------------------------------------------------
+
+def next_question_id(
+    brief: UserBuildBrief,
+    asked_so_far: set[str],
+) -> str | None:
+    """Return the ID of the next unanswered QUESTION_SEQUENCE entry, or None if done.
+
+    The single source of truth for "which question is next" within the static
+    sequence — skips entries that are:
+    1. Already in asked_so_far (asked or harness-flagged as opportunistically filled).
+    2. Already filled according to the brief's own state (source-flag safety net for
+       source-flagged sections and sentinel checks for budget/purpose/software).
+
+    Deliberately unaware of brief.open_questions — an open question is free-form
+    clarification text, not a QUESTION_SEQUENCE id. next_question() below checks
+    open_questions itself before falling back to this walk; callers that only
+    need the ID (routing, non-interactive drivers) should call this directly
+    instead of re-walking QUESTION_SEQUENCE themselves.
+    """
+    for q in QUESTION_SEQUENCE:
+        if q.id in asked_so_far:
+            continue
+        if _is_field_filled(brief, q.id):
+            continue
+        return q.id
+    return None
+
 
 def next_question(
     brief: UserBuildBrief,
@@ -505,10 +532,7 @@ def next_question(
        QUESTION_SEQUENCE entirely: serve the open question itself (attempts 0 or 2 —
        first ask, or the one further open-ended attempt after a "no"), or the
        confirm-to-default prompt (attempts == 1).
-    Skips QUESTION_SEQUENCE entries that are:
-    1. Already in asked_so_far (asked or harness-flagged as opportunistically filled).
-    2. Already filled according to the brief's own state (source-flag safety net for
-       source-flagged sections and sentinel checks for budget/purpose/software).
+    Otherwise defers to next_question_id() for which QUESTION_SEQUENCE entry is next.
     """
     if brief.open_questions:
         oq = brief.open_questions[0]
@@ -517,13 +541,11 @@ def next_question(
             return _CONFIRM_DEFAULT_TEXT
         return oq
 
-    for q in QUESTION_SEQUENCE:
-        if q.id in asked_so_far:
-            continue
-        if _is_field_filled(brief, q.id):
-            continue
-        return call_text(q.raw_text, system=_SYSTEM_PROMPT)
-    return None
+    q_id = next_question_id(brief, asked_so_far)
+    if q_id is None:
+        return None
+    q = next(q for q in QUESTION_SEQUENCE if q.id == q_id)
+    return call_text(q.raw_text, system=_SYSTEM_PROMPT)
 
 # ---------------------------------------------------------------------------
 # _is_exit_signal() — internal

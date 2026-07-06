@@ -50,6 +50,7 @@ try:
         floor_met,
         newly_filled_sections,
         next_question,
+        next_question_id,
     )
     _HAS_NODE1 = True
 except ImportError:
@@ -362,12 +363,7 @@ def run_intake(state: PipelineState) -> PipelineState:
                 # first raised, not necessarily the next unasked sequence item.
                 current_q_id: str | None = pending_open_question_field
             else:
-                # Identify which question ID is being asked — first in the ordered
-                # sequence not yet in asked_so_far (mirrors next_question's own walk).
-                current_q_id = next(
-                    (q.id for q in QUESTION_SEQUENCE if q.id not in asked_so_far),
-                    None,
-                )
+                current_q_id = next_question_id(brief, asked_so_far)
         else:
             asked_count = len(asked_so_far)
             question = (
