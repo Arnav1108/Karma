@@ -64,6 +64,15 @@ _EXTRACT_SYSTEM = (
     "defaults. "
     "For fields that carry a 'source' key, set source to 'user_stated' whenever you "
     "fill that field.\n\n"
+    "CLARIFICATION RULE: if the user's latest answer is too ambiguous to confidently "
+    "fill a required field (budget, primary use case) or an ask-if-ambiguous field "
+    "(performance, monitor, storage, operating_system) — e.g. they say 'video editing' "
+    "without naming software, or 'a decent monitor' without specs — do NOT guess a "
+    "value for it and do NOT leave it silently at a default. Instead set "
+    "`clarification_needed` to ONE specific, concrete follow-up question that would "
+    "resolve the ambiguity, and leave the underlying field null/unset. Only ever flag "
+    "the single most blocking ambiguity per turn; never set it for fields the user "
+    "simply hasn't reached yet.\n\n"
     "Intensity MUST follow these rules — do not default to moderate:\n"
     "- heavy: AAA open-world or realistic games (RDR2, GTA, Cyberpunk, Elden Ring etc), "
     "any local ML/LLM inference, PyTorch/CUDA training, 3D rendering, video editing "
@@ -191,6 +200,113 @@ QUESTION_SEQUENCE: list[_QuestionDef] = [
 _SOURCE_FLAGGED_IDS = {"performance", "monitor", "storage", "operating_system"}
 
 # ---------------------------------------------------------------------------
+# Ask-if-ambiguous open-question mechanism (DESIGN.md §2.1 / §9)
+# ---------------------------------------------------------------------------
+
+# Max attempts before an open question is force-resolved: attempt 1 asks it plainly,
+# attempt 2 asks the confirm-to-default prompt, attempt 2's "no" grants one further
+# open-ended attempt (tracked as attempts==2) after which it is force-cleared —
+# this constant is the attempts value at which force-clearing kicks in.
+_FORCE_CLEAR_AT_ATTEMPTS = 2
+
+_CONFIRM_DEFAULT_TEXT = (
+    "I still can't pin this down — should I go with a sensible default and move on?"
+)
+
+_AFFIRMATIVE_PATTERN = re.compile(r"^(y|yes|yeah|yep|sure|ok|okay)$", re.IGNORECASE)
+
+
+def _is_affirmative(answer: str) -> bool:
+    return bool(_AFFIRMATIVE_PATTERN.match(answer.strip()))
+
+
+# Blank-brief-equivalent defaults for the source-flagged sections, applied when an
+# open question about one of them is force-resolved without the user ever resolving
+# the ambiguity themselves.
+_SOURCE_FLAGGED_DEFAULTS: dict[str, dict[str, Any]] = {
+    "performance": {"target_resolution": None, "target_framerate": None, "hdr_wanted": False},
+    "monitor": {"owned": "no", "owned_specs": None, "target_specs": None, "count": 1},
+    "storage": {"capacity_gb": None, "speed_tier": "nvme", "data_profile": "mixed"},
+    "operating_system": {"os": "windows", "license": "oem"},
+}
+
+# Heuristic resolution-string -> Performance.target_resolution tier mapping, used
+# only by the `inferred` heuristic below (never by direct user-stated extraction).
+_RESOLUTION_TIER_MAP = {
+    "1920x1080": "1080p", "1080p": "1080p", "fhd": "1080p",
+    "2560x1440": "1440p", "1440p": "1440p", "qhd": "1440p", "2k": "1440p",
+    "3840x2160": "4K", "4k": "4K", "uhd": "4K",
+}
+
+
+def _map_monitor_resolution(resolution: str) -> str | None:
+    return _RESOLUTION_TIER_MAP.get(resolution.strip().lower().replace(" ", ""))
+
+
+def _apply_heuristic_inferences(data: dict[str, Any]) -> dict[str, Any]:
+    """Fill source-flagged sections via a computed/heuristic default when a related
+    section gives enough signal, without the user ever directly answering that
+    section's own question. Marked source=inferred — distinct from user_stated
+    (explicit statement) and skipped_by_user (open-question abandonment).
+    """
+    perf = data.get("performance")
+    mon = data.get("monitor")
+    if (
+        perf is not None
+        and mon is not None
+        and perf.get("source") == SourceFlag.default_applied.value
+        and mon.get("owned") == "yes"
+        and mon.get("owned_specs")
+    ):
+        tier = _map_monitor_resolution(mon["owned_specs"].get("resolution", ""))
+        if tier is not None:
+            perf["target_resolution"] = tier
+            perf["target_framerate"] = mon["owned_specs"].get("refresh_hz")
+            perf["source"] = SourceFlag.inferred.value
+    return data
+
+
+def _add_open_question(brief: UserBuildBrief, question: str) -> UserBuildBrief:
+    if question in brief.open_questions:
+        return brief
+    data = brief.model_dump()
+    data["open_questions"] = [*data.get("open_questions", []), question]
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return UserBuildBrief.model_validate(data)
+
+
+def _remove_open_question(brief: UserBuildBrief, question: str) -> UserBuildBrief:
+    if question not in brief.open_questions:
+        return brief
+    data = brief.model_dump()
+    data["open_questions"] = [q for q in data.get("open_questions", []) if q != question]
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return UserBuildBrief.model_validate(data)
+
+
+def _force_resolve_open_question(
+    brief: UserBuildBrief,
+    open_question: str,
+    question_id: str | None,
+) -> UserBuildBrief:
+    """Clear open_question; apply the section's default + skipped_by_user when the
+    target section carries a source flag, otherwise just clear (no field mutation).
+    """
+    data = brief.model_dump()
+    data["open_questions"] = [q for q in data.get("open_questions", []) if q != open_question]
+    if question_id in _SOURCE_FLAGGED_DEFAULTS:
+        section = dict(data[question_id])
+        section.update(_SOURCE_FLAGGED_DEFAULTS[question_id])
+        section["source"] = SourceFlag.skipped_by_user.value
+        data[question_id] = section
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    merged = UserBuildBrief.model_validate(data)
+    completeness = _compute_completeness(merged)
+    merged_data = merged.model_dump()
+    merged_data["completeness"] = completeness.model_dump()
+    return UserBuildBrief.model_validate(merged_data)
+
+# ---------------------------------------------------------------------------
 # Internal extraction model (_IntakeDelta)
 # ---------------------------------------------------------------------------
 
@@ -213,6 +329,7 @@ class _IntakeDelta(BaseModel):
     longevity: Longevity | None = None
     extras: Extras | None = None
     hard_constraints: HardConstraints | None = None
+    clarification_needed: str | None = None
 
 # ---------------------------------------------------------------------------
 # blank_brief()
@@ -323,15 +440,15 @@ def _is_field_filled(brief: UserBuildBrief, question_id: str) -> bool:
     if question_id == "software":
         return len(brief.software) > 0
     if question_id == "performance":
-        return brief.performance.source == SourceFlag.user_stated
+        return brief.performance.source != SourceFlag.default_applied
     if question_id == "monitor":
-        return brief.monitor.source == SourceFlag.user_stated
+        return brief.monitor.source != SourceFlag.default_applied
     if question_id == "peripherals":
         return len(brief.peripherals) > 0
     if question_id == "storage":
-        return brief.storage.source == SourceFlag.user_stated
+        return brief.storage.source != SourceFlag.default_applied
     if question_id == "operating_system":
-        return brief.operating_system.source == SourceFlag.user_stated
+        return brief.operating_system.source != SourceFlag.default_applied
     # Remaining sections (existing, physical, longevity, extras, hard_constraints)
     # have no source flag and use asked_so_far tracking (rule 1 in next_question).
     return False
@@ -380,14 +497,26 @@ def newly_filled_sections(
 def next_question(
     brief: UserBuildBrief,
     asked_so_far: set[str],
+    open_question_attempts: dict[str, int] | None = None,
 ) -> str | None:
     """Return the next unanswered question phrased conversationally, or None if done.
 
-    Skips questions that are:
+    0. If brief.open_questions is non-empty, that takes priority over
+       QUESTION_SEQUENCE entirely: serve the open question itself (attempts 0 or 2 —
+       first ask, or the one further open-ended attempt after a "no"), or the
+       confirm-to-default prompt (attempts == 1).
+    Skips QUESTION_SEQUENCE entries that are:
     1. Already in asked_so_far (asked or harness-flagged as opportunistically filled).
     2. Already filled according to the brief's own state (source-flag safety net for
        source-flagged sections and sentinel checks for budget/purpose/software).
     """
+    if brief.open_questions:
+        oq = brief.open_questions[0]
+        attempts = (open_question_attempts or {}).get(oq, 0)
+        if attempts == 1:
+            return _CONFIRM_DEFAULT_TEXT
+        return oq
+
     for q in QUESTION_SEQUENCE:
         if q.id in asked_so_far:
             continue
@@ -479,6 +608,10 @@ def _merge_delta(
 
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
 
+    # Computed/heuristic defaults (source=inferred) — never overrides a user_stated
+    # or already-inferred value; only fills a still-default_applied section.
+    data = _apply_heuristic_inferences(data)
+
     # Recompute completeness after merge.
     merged = UserBuildBrief.model_validate(data)
     completeness = _compute_completeness(merged)
@@ -512,20 +645,61 @@ def extract_turn(
     user_answer: str,
     current_brief: UserBuildBrief,
     conversation_history: list[dict],
+    current_question_id: str | None = None,
+    open_question_attempts: dict[str, int] | None = None,
 ) -> UserBuildBrief:
     """Extract and merge whatever the user stated in this turn into the brief.
 
     Step 0 — early-exit: if the user said "done"/"stop" and the floor is met,
     lock the brief immediately (no LLM extraction needed).
 
+    Step 0.5 — open-question state machine: if current_brief.open_questions is
+    non-empty, this turn's answer is a response to that pending clarification (per
+    next_question's priority rule), not a fresh QUESTION_SEQUENCE answer. Attempts
+    are tracked in open_question_attempts (mutated in place — caller-owned, mirrors
+    asked_so_far — so this function's return type stays UserBuildBrief-only):
+      - attempts == 0: first ask already happened: fall through to normal
+        extraction below to see if this answer resolves it.
+      - attempts == 1: this answer responds to the confirm-to-default prompt.
+        Yes -> force-resolve (default + skipped_by_user where the section has a
+        source flag). No -> grant one further open-ended attempt (attempts -> 2).
+      - attempts >= 2: the further open-ended attempt has now been answered —
+        force-resolve unconditionally. Bounded to at most 3 asks; never loops.
+    current_question_id identifies which brief section the pending open question
+    concerns (established by the caller when the clarification was first raised),
+    used only to select the right default on a force-resolve.
+
     Step 1 — extraction: call_structured against _IntakeDelta with full conversation
     context. On StructuredCallError, return current_brief unchanged.
 
-    Step 2 — merge: call _merge_delta to produce an updated brief.
+    Step 2 — merge: call _merge_delta to produce an updated brief. If the delta
+    still flags clarification_needed for a pending open question, keep it open and
+    bump attempts instead of guessing the field; if resolved, drop it.
     """
     # Step 0 — early-exit
     if _is_exit_signal(user_answer) and floor_met(current_brief):
         return lock_brief(current_brief)
+
+    # Step 0.5 — open-question state machine (attempts 1 and 2+ short-circuit
+    # before any LLM extraction call; attempt 0 falls through below).
+    pending_oq = current_brief.open_questions[0] if current_brief.open_questions else None
+
+    if pending_oq is not None:
+        attempts = open_question_attempts.get(pending_oq, 0) if open_question_attempts is not None else 0
+
+        if attempts == 1:
+            if _is_affirmative(user_answer):
+                if open_question_attempts is not None:
+                    open_question_attempts.pop(pending_oq, None)
+                return _force_resolve_open_question(current_brief, pending_oq, current_question_id)
+            if open_question_attempts is not None:
+                open_question_attempts[pending_oq] = _FORCE_CLEAR_AT_ATTEMPTS
+            return current_brief
+
+        if attempts >= _FORCE_CLEAR_AT_ATTEMPTS:
+            if open_question_attempts is not None:
+                open_question_attempts.pop(pending_oq, None)
+            return _force_resolve_open_question(current_brief, pending_oq, current_question_id)
 
     # Step 1 — build extraction prompt
     history_text = "\n".join(
@@ -560,4 +734,20 @@ def extract_turn(
         return current_brief
 
     # Step 2 — merge
-    return _merge_delta(current_brief, delta)
+    merged = _merge_delta(current_brief, delta)
+
+    if delta.clarification_needed:
+        if pending_oq is not None:
+            # Still ambiguous on retry — keep the ORIGINAL open question active
+            # (ignore any reworded text) and move to the confirm-to-default phase.
+            if open_question_attempts is not None:
+                open_question_attempts[pending_oq] = 1
+        else:
+            merged = _add_open_question(merged, delta.clarification_needed)
+    elif pending_oq is not None:
+        # Resolved: the LLM didn't re-flag ambiguity for it this turn.
+        merged = _remove_open_question(merged, pending_oq)
+        if open_question_attempts is not None:
+            open_question_attempts.pop(pending_oq, None)
+
+    return merged

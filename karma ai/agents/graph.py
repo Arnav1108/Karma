@@ -24,7 +24,14 @@ from agents.state.pipeline_state import PipelineState
 # ---------------------------------------------------------------------------
 
 try:
-    from agents.nodes.node1_intake import extract_turn, floor_met, lock_brief, next_question
+    from agents.nodes.node1_intake import (
+        QUESTION_SEQUENCE,
+        _is_field_filled,
+        extract_turn,
+        floor_met,
+        lock_brief,
+        next_question,
+    )
     _HAS_NODE1 = True
 except ImportError:
     _HAS_NODE1 = False
@@ -74,7 +81,13 @@ def node_intake(state: PipelineState) -> PipelineState:
     if not _HAS_NODE1:
         return {"current_node": "node_intake"}  # type: ignore[return-value]
 
-    question = next_question(brief, set())
+    # open_question_attempts persists across repeated node_intake invocations the
+    # same way conversation_history/fitness_thresholds already do: read the
+    # incoming copy, mutate it (extract_turn/next_question mutate in place), hand
+    # the same dict back in the returned partial state.
+    open_question_attempts: dict[str, int] = dict(state.get("open_question_attempts") or {})
+
+    question = next_question(brief, set(), open_question_attempts)
     if question is None:
         # Question sequence exhausted. Only proceed if the floor gate (budget +
         # primary use case) is actually met — never silently lock a brief that
@@ -93,6 +106,18 @@ def node_intake(state: PipelineState) -> PipelineState:
             "current_node": "node_cannot_proceed",
         }
 
+    # current_question_id: node_intake has no persisted asked_so_far (each
+    # invocation walks the sequence fresh from the brief alone), so this mirrors
+    # next_question's own internal walk — with an empty asked_so_far its only
+    # filter is _is_field_filled — to identify the SAME field next_question just
+    # served, whether that's a fresh QUESTION_SEQUENCE item or an open question
+    # still being resolved (its field stays "unfilled" for the whole 3-ask cycle,
+    # by construction, so the same walk finds it in both cases).
+    current_question_id = next(
+        (q.id for q in QUESTION_SEQUENCE if not _is_field_filled(brief, q.id)),
+        None,
+    )
+
     # In graph mode, the harness supplies the user answer via state before
     # invoking this node.  Pull it from the last user turn in history.
     user_answer: str = ""
@@ -101,12 +126,19 @@ def node_intake(state: PipelineState) -> PipelineState:
             user_answer = turn["content"]
             break
 
-    updated_brief = extract_turn(user_answer, brief, history)
+    updated_brief = extract_turn(
+        user_answer,
+        brief,
+        history,
+        current_question_id=current_question_id,
+        open_question_attempts=open_question_attempts,
+    )
     history.append({"role": "user", "content": user_answer})
 
     return {  # type: ignore[return-value]
         "current_brief": updated_brief,
         "conversation_history": history,
+        "open_question_attempts": open_question_attempts,
         "current_node": "node_feasibility" if getattr(updated_brief, "status", None) == "locked" else "node_intake",
     }
 
