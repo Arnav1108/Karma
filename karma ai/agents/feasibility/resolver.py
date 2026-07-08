@@ -54,13 +54,12 @@ def _bump(tier: IntEnum, levels: int) -> IntEnum:
 
 
 # ---------------------------------------------------------------------------
-# STUB base-floor lookup  (software -> component floor)
+# Base-floor lookup  (software -> component floor)
 # ---------------------------------------------------------------------------
-# !!! STUB !!! Placeholder values, NOT benchmark data. Replace later with a real
-# per-title requirements table. Covers the software in the three Phase-0 fixtures
-# plus a per-category fallback for anything unknown. VRAM bases for the heavy
-# creative/ML titles are deliberately kept BELOW the fixtures' hard-constraint
-# minimums so the constraint floor visibly wins the max() (see fold_constraints).
+# Per-title floors come from agents/software_specs.py: a Postgres-cached,
+# LLM-backed lookup shared with node2_allocation.py (see that module's
+# software-hints section). _CATEGORY_FALLBACK_STUB stays here as the shared
+# fallback for when that lookup fails outright (LLM/Postgres unreachable).
 
 class BaseFloor(BaseModel):
     gpu_tier: GpuTier
@@ -70,20 +69,7 @@ class BaseFloor(BaseModel):
     storage_gb: int
 
 
-# STUB: keyed by lowercased software name.
-_BASE_FLOOR_STUB: dict[str, BaseFloor] = {
-    "valorant":          BaseFloor(gpu_tier=GpuTier.entry, cpu_tier=CpuTier.mid,  vram_gb=4,  ram_gb=8,  storage_gb=50),
-    "cs2":               BaseFloor(gpu_tier=GpuTier.entry, cpu_tier=CpuTier.mid,  vram_gb=6,  ram_gb=8,  storage_gb=40),
-    "gta v":             BaseFloor(gpu_tier=GpuTier.mid,   cpu_tier=CpuTier.mid,  vram_gb=6,  ram_gb=12, storage_gb=110),
-    "davinci resolve":   BaseFloor(gpu_tier=GpuTier.high,  cpu_tier=CpuTier.high, vram_gb=8,  ram_gb=32, storage_gb=100),
-    "adobe premiere pro": BaseFloor(gpu_tier=GpuTier.mid,  cpu_tier=CpuTier.high, vram_gb=8,  ram_gb=32, storage_gb=80),
-    "blender":           BaseFloor(gpu_tier=GpuTier.high,  cpu_tier=CpuTier.high, vram_gb=8,  ram_gb=16, storage_gb=30),
-    "pytorch with cuda": BaseFloor(gpu_tier=GpuTier.enthusiast, cpu_tier=CpuTier.high, vram_gb=12, ram_gb=32, storage_gb=100),
-    "vs code":           BaseFloor(gpu_tier=GpuTier.igpu,  cpu_tier=CpuTier.mid,  vram_gb=0,  ram_gb=8,  storage_gb=10),
-    "stable diffusion":  BaseFloor(gpu_tier=GpuTier.enthusiast, cpu_tier=CpuTier.mid, vram_gb=12, ram_gb=16, storage_gb=60),
-}
-
-# STUB: fallback floor by SoftwareEntry.category for unknown titles.
+# STUB: fallback floor by SoftwareEntry.category for unknown/unreachable titles.
 _CATEGORY_FALLBACK_STUB: dict[str, BaseFloor] = {
     "game":  BaseFloor(gpu_tier=GpuTier.mid,  cpu_tier=CpuTier.mid,  vram_gb=6, ram_gb=16, storage_gb=80),
     "video": BaseFloor(gpu_tier=GpuTier.high, cpu_tier=CpuTier.high, vram_gb=8, ram_gb=32, storage_gb=100),
@@ -95,8 +81,15 @@ _CATEGORY_FALLBACK_STUB: dict[str, BaseFloor] = {
 
 
 def _lookup_base_floor(name: str, category: str) -> BaseFloor:
-    """STUB: per-title floor if known, else the category fallback."""
-    return _BASE_FLOOR_STUB.get(name.strip().lower()) or _CATEGORY_FALLBACK_STUB[category]
+    """Per-title floor via the shared software_specs lookup.
+
+    Local import: software_specs.py imports BaseFloor/GpuTier/CpuTier/
+    _CATEGORY_FALLBACK_STUB from this module, so a top-level import here would
+    be circular. This module never needs software_specs at import time — only
+    when a title is actually looked up.
+    """
+    from .. import software_specs
+    return software_specs.get_software_requirements(name, category)
 
 
 # ---------------------------------------------------------------------------
