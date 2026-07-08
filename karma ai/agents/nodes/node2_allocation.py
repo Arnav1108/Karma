@@ -16,6 +16,7 @@ import math
 from pydantic import RootModel
 
 from .. import costs as _costs
+from .. import software_specs
 from ..feasibility.catalog_floor import compute_catalog_floor
 from ..feasibility.resolver import resolve_requirements
 from ..llm.client import call_structured
@@ -110,20 +111,20 @@ _ALLOCATION_PROFILES: dict[str, dict[ComponentSlot, int]] = {
 # Tables live in agents/costs.py, SHARED with the Feasibility Check so the core
 # pool Node 2 allocates and the pool the verdict is judged against are the same.
 
-# ── Software minimum spec stubs ───────────────────────────────────────────────
-# STUB: At runtime, these should be fetched via web-search from authoritative
-# sources (Steam, Epic Games, vendor pages). Hardcoded for Phase 1.
-_SOFTWARE_SPECS: dict[str, str] = {
-    "Valorant": "GPU: GTX 1050 Ti 4GB, CPU: i3-4150, RAM: 4GB",
-    "CS2": "GPU: GTX 970, CPU: i5-7600K, RAM: 8GB",
-    "GTA V": "GPU: GTX 660 2GB, CPU: i5-3470, RAM: 8GB",
-    "DaVinci Resolve": "GPU: 2GB VRAM min (8GB+ recommended), CPU: 8 cores, RAM: 16GB",
-    "Adobe Premiere Pro": "GPU: 4GB VRAM (CUDA/Metal), CPU: 8 cores, RAM: 16GB",
-    "Blender": "GPU: 4GB VRAM, CPU: 8 cores, RAM: 16GB",
-    "PyTorch with CUDA": "GPU: CUDA-capable NVIDIA (24GB VRAM+ for LLM training), RAM: 32GB+",
-    "Stable Diffusion": "GPU: NVIDIA 8GB+ VRAM recommended, RAM: 16GB+",
-    "VS Code": "CPU: dual-core, RAM: 4GB",
-}
+# ── Software minimum specs ────────────────────────────────────────────────────
+# Sourced via agents/software_specs.py — the same Postgres-cached, LLM-backed
+# lookup the Feasibility Check's resolver.py uses, so the two never disagree.
+
+def _build_software_hints(brief: UserBuildBrief) -> str:
+    """Format each brief.software entry's resolved floor into a prompt hint line."""
+    lines: list[str] = []
+    for entry in brief.software:
+        floor = software_specs.get_software_requirements(entry.name, entry.category)
+        lines.append(
+            f"  {entry.name}: GPU tier={floor.gpu_tier.name} (~{floor.vram_gb}GB VRAM), "
+            f"CPU tier={floor.cpu_tier.name}, RAM={floor.ram_gb}GB"
+        )
+    return "\n".join(lines) if lines else "  (no software specified)"
 
 
 # ── Deterministic distribution ────────────────────────────────────────────────
@@ -326,13 +327,8 @@ def allocate_budget(brief: UserBuildBrief) -> PriceBands:
         for s, w in profile_for_prompt.items()
     }
 
-    # Software hints (STUB — should be fetched via web-search at runtime)
-    sw_lines: list[str] = []
-    for entry in brief.software:
-        spec = _SOFTWARE_SPECS.get(entry.name)
-        if spec:
-            sw_lines.append(f"  {entry.name}: {spec}")
-    sw_section = "\n".join(sw_lines) if sw_lines else "  (no known specs for listed software)"
+    # Software hints — resolved floors from the shared software_specs lookup.
+    sw_section = _build_software_hints(brief)
 
     slot_names = ", ".join(s.value for s in shopping_list)
     profile_lines = "\n".join(
@@ -361,7 +357,7 @@ GPU={brief.existing.ecosystem_prefs.gpu_brand_pref or "none"}
 - Hard constraints (must_have): {", ".join(c.type + "=" + c.value for c in brief.hard_constraints.must_have) or "none"}
 - Performance target: {brief.performance.target_resolution or "N/A"} / {brief.performance.target_framerate or "N/A"} fps
 
-Software minimum specs (STUB — authoritative sources not queried):
+Software minimum specs:
 {sw_section}
 
 Return a JSON object with exactly these keys: {slot_names}

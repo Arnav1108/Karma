@@ -99,3 +99,50 @@ class PostgresClient:
             )
             columns = [desc[0] for desc in cur.description]
             return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def get_software_spec_cache(self, name: str) -> dict | None:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT category, gpu_tier, cpu_tier, vram_gb, ram_gb, storage_gb
+                FROM software_specs_cache
+                WHERE name = %s
+                """,
+                (name,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            columns = [desc[0] for desc in cur.description]
+            return dict(zip(columns, row))
+
+    def set_software_spec_cache(
+        self,
+        name: str,
+        category: str,
+        *,
+        gpu_tier: int,
+        cpu_tier: int,
+        vram_gb: int,
+        ram_gb: int,
+        storage_gb: int,
+        source: str,
+    ) -> None:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO software_specs_cache
+                    (name, category, gpu_tier, cpu_tier, vram_gb, ram_gb, storage_gb, source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (name) DO UPDATE SET
+                    category = EXCLUDED.category,
+                    gpu_tier = EXCLUDED.gpu_tier,
+                    cpu_tier = EXCLUDED.cpu_tier,
+                    vram_gb = EXCLUDED.vram_gb,
+                    ram_gb = EXCLUDED.ram_gb,
+                    storage_gb = EXCLUDED.storage_gb,
+                    source = EXCLUDED.source,
+                    created_at = now()
+                """,
+                (name, category, gpu_tier, cpu_tier, vram_gb, ram_gb, storage_gb, source),
+            )

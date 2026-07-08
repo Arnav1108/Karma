@@ -87,8 +87,9 @@ flowchart TD
 
 **Open items (updated):**
 - ~~Realistic-min buffer calibration~~ ✅ **RESOLVED** — the tight/comfortable boundary is the empirically calibrated `_TIGHT_RATIO = 0.85` (anchored between a 1.04-ratio tight case and a 0.82-ratio comfortable case; re-derivable any time stock shifts via `scripts/calibration_sweep.py`).
-- Non-component cost estimates remain rough hand-picked STUB values in `costs.py` (centralized, but not sourced from real pricing).
-- Reused-parts compatibility stubs: `existing.existing_pc_build_id` (PC-of-record) is consumed by nothing; reused-part value is a flat stub table; reused-part socket/form-factor constraints exist only as free-text notes — `min_viable_build` excludes reused slots without applying their constraints to the rest of the build.
+- ~~Reused-part value~~ ✅ **RESOLVED** — no longer a flat stub: `costs.reused_part_value(slot)` now averages live in-stock catalog prices per category (`costs.average_catalog_price`, cached per process, `refresh_catalog_price_cache()` to recompute), falling back to the old hand-picked table only when Postgres is unreachable or the category has zero in-stock parts.
+- Non-component cost estimates (OS license, monitor, must-have peripherals) remain rough hand-picked STUB values in `costs.py` (centralized, but not sourced from real pricing) — no catalog data source exists for these categories.
+- Reused-parts constraint propagation — a Node Three concern, not a feasibility gap: `existing.existing_pc_build_id` (PC-of-record) is consumed by nothing, and `min_viable_build` excludes reused slots from cost entirely without applying their socket/form-factor constraints to the rest of the build (e.g. a reused case's form factor doesn't constrain the motherboard the floor picks).
 
 ### 2.3 Node Two — Budget Allocation Agent 🔒 🛠️
 
