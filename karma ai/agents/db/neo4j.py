@@ -139,11 +139,6 @@ def get_driver():
     return _get_driver()
 
 
-def get_driver():
-    """Public accessor for the singleton Neo4j driver."""
-    return _get_driver()
-
-
 def _get_driver():
     global _driver
     if _driver is None:
