@@ -64,20 +64,21 @@ _FULL_CATALOG_HIGH = 10**9
 # ── Structured LLM output models ──────────────────────────────────────────────
 
 class FitnessThresholds(BaseModel):
-    """Per-slot fitness thresholds (0.0–1.0) produced by one upfront LLM call.
+    """Fitness thresholds (0.0–1.0) produced by one upfront LLM call.
 
     Higher value = component is more critical for the use case → stricter
     Neo4j fitness_filter threshold applied during slot selection.
+
+    Only gpu/cpu are modeled: they are the only two categories with any
+    GOOD_FOR edges in the graph (confirmed via live query — 42 gpu / 48 cpu
+    edges, zero for ram/storage/motherboard/psu/case/cooler/fans; see
+    docs/context.md open items 4-5). A threshold for a slot with no fitness
+    data can never influence fitness_filter's ranking (it always fails open
+    for that slot regardless of the threshold value), so deriving one for the
+    other seven slots was a wasted LLM computation.
     """
     gpu: float
     cpu: float
-    ram: float
-    storage: float
-    motherboard: float
-    psu: float
-    case: float
-    cooler: float
-    fans: float
 
 
 class SelectedPart(BaseModel):
@@ -330,10 +331,17 @@ def _threshold_key(brief: UserBuildBrief) -> dict:
 # ── Fitness threshold derivation ──────────────────────────────────────────────
 
 def derive_fitness_thresholds(brief: UserBuildBrief) -> dict[ComponentSlot, float]:
-    """One LLM call upfront — returns a fitness threshold per component slot.
+    """One LLM call upfront — returns a fitness threshold for gpu/cpu only.
 
     Result is stored in build state by select_build and passed into every
     select_part call. Never re-derived per slot.
+
+    Restricted to gpu/cpu because those are the only slots with any GOOD_FOR
+    fitness edges in the graph — the other seven (ram, storage, motherboard,
+    psu, case, cooler, fans) always fail open in fitness_filter regardless of
+    threshold, so a threshold for them can never affect selection. The
+    returned dict simply has no entry for those slots; see the module-level
+    FitnessThresholds docstring and docs/context.md open items 4-5.
     """
     software_text = "; ".join(
         f"{s.name} ({s.category}, {s.intensity})" for s in brief.software
@@ -344,7 +352,7 @@ def derive_fitness_thresholds(brief: UserBuildBrief) -> dict[ComponentSlot, floa
 
     prompt = (
         "You are a PC component advisor. Given the user build brief below, assign a "
-        "fitness threshold (0.0–1.0) to each of the nine component slots. The threshold "
+        "fitness threshold (0.0–1.0) to the GPU and CPU slots. The threshold "
         "captures how critical that slot is to the primary use case — higher means more "
         "critical and deserving of a stricter component bar.\n\n"
         f"Primary use case : {brief.purpose.primary_use_case}\n"
@@ -356,11 +364,8 @@ def derive_fitness_thresholds(brief: UserBuildBrief) -> dict[ComponentSlot, floa
         f"Target           : {brief.performance.target_resolution} @ "
         f"{brief.performance.target_framerate} fps\n"
         f"Upgrade path     : {brief.longevity.upgrade_path}\n\n"
-        "Return a JSON with float thresholds (0.0–1.0) for all nine slots: "
-        "gpu, cpu, ram, storage, motherboard, psu, case, cooler, fans.\n"
-        "Example (gaming, competitive FPS): "
-        "gpu=0.85, cpu=0.65, ram=0.45, storage=0.35, motherboard=0.50, "
-        "psu=0.40, case=0.20, cooler=0.30, fans=0.15"
+        "Return a JSON with float thresholds (0.0–1.0) for gpu and cpu.\n"
+        "Example (gaming, competitive FPS): gpu=0.85, cpu=0.65"
     )
     result = call_structured(
         prompt, FitnessThresholds, model=THRESHOLD_MODEL, temperature=0
@@ -368,13 +373,6 @@ def derive_fitness_thresholds(brief: UserBuildBrief) -> dict[ComponentSlot, floa
     return {
         ComponentSlot.gpu: result.gpu,
         ComponentSlot.cpu: result.cpu,
-        ComponentSlot.ram: result.ram,
-        ComponentSlot.storage: result.storage,
-        ComponentSlot.motherboard: result.motherboard,
-        ComponentSlot.psu: result.psu,
-        ComponentSlot.case: result.case,
-        ComponentSlot.cooler: result.cooler,
-        ComponentSlot.fans: result.fans,
     }
 
 
@@ -541,13 +539,18 @@ def select_part(
     # make a truthiness check on the list itself always True and mislabel every
     # catalog-order passthrough as a real fitness ranking (see docs/context.md
     # open item 4 follow-up).
+    # fitness_thresholds only carries entries for slots with real GOOD_FOR
+    # coverage (gpu, cpu — see derive_fitness_thresholds). A missing entry
+    # means "no fitness ranking possible for this slot" — the same outcome
+    # fitness_filter would fail open to anyway, so skip the call entirely.
     fitness_ranked = False
-    if neo4j_available:
+    threshold = fitness_thresholds.get(slot)
+    if neo4j_available and threshold is not None:
         by_id = {c["product_id"]: c for c in working}
         ranking = neo4j.fitness_filter(
             list(by_id.keys()),
             brief.purpose.primary_use_case,
-            fitness_thresholds[slot],
+            threshold,
         )
         if ranking.ordered_ids:
             reordered = [by_id[pid] for pid in ranking.ordered_ids if pid in by_id]
@@ -558,7 +561,7 @@ def select_part(
             logger.info(
                 "[Node3] %s: fitness_filter returned empty (threshold %.2f) — keeping "
                 "%d compatible part(s) unranked",
-                slot.value, fitness_thresholds[slot], len(working),
+                slot.value, threshold, len(working),
             )
 
     shortlist_dicts = working[:_MAX_SHORTLIST]
@@ -592,7 +595,7 @@ def select_part(
     if fitness_ranked:
         fitness_context = (
             f"  Fitness     : this build's derived requirement level for {slot.value} "
-            f"is {fitness_thresholds[slot]:.2f} (0.0-1.0, higher = more critical to the "
+            f"is {threshold:.2f} (0.0-1.0, higher = more critical to the "
             f"use case). Options are listed best-fit-first per that signal (not by "
             f"price) — weigh fitness rank alongside price/specs; don't default to a "
             f"lower-ranked option purely because it's cheaper, but it can still win on "
