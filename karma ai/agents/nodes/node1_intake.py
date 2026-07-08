@@ -1,15 +1,23 @@
 """Node 1 — per-turn intake logic.
 
 The harness (separate task) owns the conversation loop. This module exposes two
-per-turn functions the harness calls plus three supporting helpers.
+per-turn functions the harness calls plus three supporting helpers, plus a
+non-interactive driver (drive_intake) that runs the whole loop given an
+answer-provider callable — used by run_pipeline.py's interactive wrapper and
+by non-interactive callers (e.g. an E2E test) alike.
 
 Public API:
     blank_brief(brief_id, user_id, chat_id, schema_version) -> UserBuildBrief
     floor_met(brief) -> bool
     newly_filled_sections(old_brief, new_brief) -> set[str]
-    next_question(brief, asked_so_far) -> str | None
-    extract_turn(user_answer, current_brief, conversation_history) -> UserBuildBrief
+    next_question_id(brief, asked_so_far) -> str | None
+    next_question(brief, asked_so_far, open_question_attempts=None) -> str | None
+    extract_turn(user_answer, current_brief, conversation_history,
+                 current_question_id=None, open_question_attempts=None) -> UserBuildBrief
     lock_brief(brief) -> UserBuildBrief
+    drive_intake(brief, answer_fn, conversation_history=None, phrase_fn=None)
+        -> tuple[UserBuildBrief, list[dict]]
+    IntakeInterrupted — raised by an answer_fn to stop drive_intake early.
 """
 
 from __future__ import annotations
@@ -18,7 +26,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -491,8 +499,35 @@ def newly_filled_sections(
     return filled
 
 # ---------------------------------------------------------------------------
-# next_question()
+# next_question_id() / next_question()
 # ---------------------------------------------------------------------------
+
+def next_question_id(
+    brief: UserBuildBrief,
+    asked_so_far: set[str],
+) -> str | None:
+    """Return the ID of the next unanswered QUESTION_SEQUENCE entry, or None if done.
+
+    The single source of truth for "which question is next" within the static
+    sequence — skips entries that are:
+    1. Already in asked_so_far (asked or harness-flagged as opportunistically filled).
+    2. Already filled according to the brief's own state (source-flag safety net for
+       source-flagged sections and sentinel checks for budget/purpose/software).
+
+    Deliberately unaware of brief.open_questions — an open question is free-form
+    clarification text, not a QUESTION_SEQUENCE id. next_question() below checks
+    open_questions itself before falling back to this walk; callers that only
+    need the ID (routing, non-interactive drivers) should call this directly
+    instead of re-walking QUESTION_SEQUENCE themselves.
+    """
+    for q in QUESTION_SEQUENCE:
+        if q.id in asked_so_far:
+            continue
+        if _is_field_filled(brief, q.id):
+            continue
+        return q.id
+    return None
+
 
 def next_question(
     brief: UserBuildBrief,
@@ -505,10 +540,7 @@ def next_question(
        QUESTION_SEQUENCE entirely: serve the open question itself (attempts 0 or 2 —
        first ask, or the one further open-ended attempt after a "no"), or the
        confirm-to-default prompt (attempts == 1).
-    Skips QUESTION_SEQUENCE entries that are:
-    1. Already in asked_so_far (asked or harness-flagged as opportunistically filled).
-    2. Already filled according to the brief's own state (source-flag safety net for
-       source-flagged sections and sentinel checks for budget/purpose/software).
+    Otherwise defers to next_question_id() for which QUESTION_SEQUENCE entry is next.
     """
     if brief.open_questions:
         oq = brief.open_questions[0]
@@ -517,13 +549,11 @@ def next_question(
             return _CONFIRM_DEFAULT_TEXT
         return oq
 
-    for q in QUESTION_SEQUENCE:
-        if q.id in asked_so_far:
-            continue
-        if _is_field_filled(brief, q.id):
-            continue
-        return call_text(q.raw_text, system=_SYSTEM_PROMPT)
-    return None
+    q_id = next_question_id(brief, asked_so_far)
+    if q_id is None:
+        return None
+    q = next(q for q in QUESTION_SEQUENCE if q.id == q_id)
+    return call_text(q.raw_text, system=_SYSTEM_PROMPT)
 
 # ---------------------------------------------------------------------------
 # _is_exit_signal() — internal
@@ -751,3 +781,116 @@ def extract_turn(
             open_question_attempts.pop(pending_oq, None)
 
     return merged
+
+# ---------------------------------------------------------------------------
+# drive_intake() — non-interactive loop driver
+# ---------------------------------------------------------------------------
+
+class IntakeInterrupted(Exception):
+    """Raised by an answer_fn to stop drive_intake() early (e.g. Ctrl-C in a CLI).
+
+    drive_intake() catches this internally — it never propagates out — and
+    finalizes the brief exactly as if the question sequence had been
+    exhausted naturally (force-lock if not already locked).
+    """
+
+
+_QUESTIONS_BY_ID: dict[str, _QuestionDef] = {q.id: q for q in QUESTION_SEQUENCE}
+
+
+def _default_phrase_fn(question_id: str) -> str:
+    """The real, LLM-phrased question text (what next_question() would return)."""
+    return call_text(_QUESTIONS_BY_ID[question_id].raw_text, system=_SYSTEM_PROMPT)
+
+
+def drive_intake(
+    brief: UserBuildBrief,
+    answer_fn: Callable[[str, str], str],
+    conversation_history: list[dict] | None = None,
+    phrase_fn: Callable[[str], str] | None = None,
+) -> tuple[UserBuildBrief, list[dict]]:
+    """Run the intake question loop to completion, independent of input()/print().
+
+    Owns the asked_so_far / opportunistic-fill bookkeeping, the ask-if-ambiguous
+    open_question_attempts state machine, and conversation-history threading that
+    both the interactive CLI harness (run_pipeline.py) and any non-interactive
+    caller (e.g. an E2E test) need identically — the single place this logic
+    lives, so the two can never drift apart.
+
+    Per turn:
+      0. If brief.open_questions is non-empty, that takes priority over
+         QUESTION_SEQUENCE (see next_question) — question_id is whichever
+         QUESTION_SEQUENCE field the pending clarification concerns
+         (pending_open_question_field), not necessarily the next unasked
+         sequence item. Otherwise next_question_id() picks the next unanswered
+         sequence question (or the loop ends).
+      1. phrase_fn(question_id) -> question text for a fresh sequence question.
+         Defaults to the real call_text phrasing; a caller that wants to skip
+         that LLM call (e.g. a scripted test feeding canned answers keyed by
+         question ID) can pass its own phrase_fn. Open-question / confirm-to-
+         default text is already phrased (next_question handles it) and never
+         goes through phrase_fn.
+      2. answer_fn(question_id, question_text) -> the user's answer. May raise
+         IntakeInterrupted to stop early (caught here, not propagated).
+      3. extract_turn(..., current_question_id=question_id,
+         open_question_attempts=open_question_attempts) merges the answer into
+         the brief — this may lock the brief early via its own "done"/"stop" +
+         floor_met exit path, or advance/force-resolve a pending open question.
+
+    Stops when next_question_id() returns None (with no pending open question),
+    extract_turn() locks the brief, or answer_fn raises IntakeInterrupted. On
+    any stop, force-locks the brief via lock_brief() if it isn't already locked
+    (mirrors run_pipeline.py's end-of-sequence behavior).
+
+    Returns (final_brief, conversation_history).
+    """
+    history = list(conversation_history or [])
+    asked_so_far: set[str] = set()
+    open_question_attempts: dict[str, int] = {}
+    pending_open_question_field: str | None = None
+    phrase = phrase_fn or _default_phrase_fn
+
+    while True:
+        if brief.open_questions:
+            question_text = next_question(brief, asked_so_far, open_question_attempts)
+            q_id = pending_open_question_field
+        else:
+            q_id = next_question_id(brief, asked_so_far)
+            if q_id is None:
+                break
+            question_text = phrase(q_id)
+
+        history.append({"role": "assistant", "content": question_text})
+
+        try:
+            user_answer = answer_fn(q_id, question_text)
+        except IntakeInterrupted:
+            break
+
+        old_brief = brief
+        had_open_question_before = bool(old_brief.open_questions)
+        brief = extract_turn(
+            user_answer,
+            brief,
+            history,
+            current_question_id=q_id,
+            open_question_attempts=open_question_attempts,
+        )
+        history.append({"role": "user", "content": user_answer})
+
+        if q_id:
+            asked_so_far.add(q_id)
+        asked_so_far.update(newly_filled_sections(old_brief, brief))
+
+        if brief.open_questions and not had_open_question_before:
+            pending_open_question_field = q_id
+        elif not brief.open_questions:
+            pending_open_question_field = None
+
+        if brief.status == "locked":
+            break
+
+    if brief.status != "locked":
+        brief = lock_brief(brief)
+
+    return brief, history
