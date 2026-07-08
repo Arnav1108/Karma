@@ -122,7 +122,6 @@ _STUB_BANDS_INR: dict[str, dict[str, int]] = {
 # ---------------------------------------------------------------------------
 
 def _stub_next_question(brief: UserBuildBrief, asked_so_far: set[str]) -> str | None:
-    # TODO: Remove when agents/nodes/node1_intake.py merges.
     # EXPECTED INTERFACE:
     #   next_question(brief: UserBuildBrief, asked_so_far: set[str]) -> str | None
     #   Walks the static QUESTION_SEQUENCE, skips IDs in asked_so_far or already
@@ -137,7 +136,6 @@ def _stub_extract_turn(
     current_brief: UserBuildBrief,
     conversation_history: list[dict],
 ) -> UserBuildBrief:
-    # TODO: Remove when agents/nodes/node1_intake.py merges.
     # EXPECTED INTERFACE:
     #   extract_turn(user_answer: str, current_brief: UserBuildBrief,
     #                conversation_history: list[dict]) -> UserBuildBrief
@@ -150,7 +148,6 @@ def _stub_extract_turn(
 
 
 def _stub_estimate_feasibility(brief: UserBuildBrief) -> FeasibilityVerdict:
-    # TODO: Remove when agents/feasibility/estimate.py merges.
     # EXPECTED INTERFACE:
     #   estimate_feasibility(brief: UserBuildBrief) -> FeasibilityVerdict
     #   Three steps: resolve_requirements() -> aggregate_scope() -> LLM call
@@ -167,7 +164,6 @@ def _stub_estimate_feasibility(brief: UserBuildBrief) -> FeasibilityVerdict:
 
 
 def _stub_allocate(brief: UserBuildBrief) -> PriceBands:
-    # TODO: Remove when agents/nodes/node2_allocation.py merges.
     # EXPECTED INTERFACE:
     #   allocate(brief: UserBuildBrief) -> PriceBands
     #   Reads default allocation profile + brief workload + live software specs,
@@ -184,7 +180,6 @@ def _stub_allocate(brief: UserBuildBrief) -> PriceBands:
 
 
 def _stub_select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
-    # TODO: Remove when agents/nodes/node3_selector.py merges.
     # EXPECTED INTERFACE:
     #   select_build(brief, price_bands, feasibility_verdict=None, cache=None) -> BuildCard
     #   Three-step funnel per slot (Postgres catalog -> Neo4j graph filter -> LLM

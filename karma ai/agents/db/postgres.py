@@ -2,9 +2,14 @@ import os
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
+from dotenv import load_dotenv
 from psycopg2.pool import ThreadedConnectionPool
 
 from agents.schemas.slots import ComponentSlot
+
+# Load .env so a standalone import has POSTGRES_URL available. Idempotent: only fills
+# vars that are not already set in the process environment.
+load_dotenv()
 
 _pool: ThreadedConnectionPool | None = None
 
