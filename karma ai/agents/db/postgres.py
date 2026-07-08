@@ -57,6 +57,19 @@ class PostgresClient:
             row = cur.fetchone()
             return int(row[0]) if row and row[0] is not None else 0
 
+    def get_avg_catalog_price(self, component_slot: ComponentSlot) -> float | None:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT AVG(price_inr)
+                FROM catalog
+                WHERE category = %s AND in_stock = TRUE
+                """,
+                (component_slot.value,),
+            )
+            row = cur.fetchone()
+            return float(row[0]) if row and row[0] is not None else None
+
     def get_all_products(self) -> list[dict]:
         with _cursor() as cur:
             cur.execute(
