@@ -117,8 +117,8 @@ No rationale, flex flags, or metadata — Node Three has the full brief and deri
 
 ### 2.4 Node Three — Part Finder & Recommender 🔒 🛠️
 
-**Selection sequence:** GPU → CPU → RAM → Storage → Motherboard → PSU → Case → Cooler → Fans.
-_(Motherboard is selected after the performance anchors are locked — it's a compatibility hub, not a constraint driver. PSU is selected after GPU + CPU so their TDP is already known.)_
+**Selection sequence:** GPU → CPU → Motherboard → RAM → Storage → PSU → Case → Cooler → Fans.
+_(Motherboard locks right after the performance anchors (GPU, CPU) so RAM's DDR-generation compatibility resolves against an already-locked board, instead of the board having to adapt to whatever RAM generation was picked first — the prior GPU→CPU→RAM→...→Motherboard order could strand a locked DDR4/DDR5 RAM pick against no compatible board later. PSU is selected after GPU + CPU so their TDP is already known.)_
 
 **Per-slot selection loop (three-step funnel):**
 
@@ -211,7 +211,7 @@ flowchart LR
 | Budget + primary use case as the proceed floor | With those two a build estimate is possible; they're the gate to proceed. Everything else is the rest of one fixed pre-prepared set, asked in full unless the user says "done" / "stop" (no arbitrary question cap). |
 | Hard constraints captured via a final open-ended question + pinned block | Non-negotiables (no-RGB, SFF, brand bans) live in structured pinned state separate from the prose summary, so they survive compaction and are never re-suggested. |
 | Node One does no feasibility/contradiction check | It has no tier/benchmark data; its only jobs are asking and forming valid JSON. Feasibility Check is the arbiter. |
-| Motherboard selected after GPU/CPU/RAM; PSU after GPU/CPU | Prevents over-constraining the build; the board adapts to anchors rather than driving them. PSU wattage depends on GPU+CPU TDP, so it can only be sized once both are locked. |
+| Motherboard selected after GPU/CPU but before RAM; PSU after GPU/CPU | Prevents over-constraining the build; the board adapts to the GPU/CPU anchors rather than driving them, and RAM's DDR-generation compatibility then resolves against the already-locked board instead of risking a stranded board later. PSU wattage depends on GPU+CPU TDP, so it can only be sized once both are locked. |
 | Fitness thresholds derived once upfront | Avoids redundant per-slot LLM calls; thresholds live in build state. |
 | Fitness is a soft rank, never a hard cutoff *(supersedes the threshold-as-filter design)* | A hard fitness gate silently emptied shortlists and interacted badly with the relaxation ladder; ranking preserves the signal without ever costing a viable build. `is_real_ranking` keeps categories with no fitness data honest (no fabricated signal in the pick prompt). |
 | Product-level graph nodes | Board-partner variants of the same chip differ enough in real-world performance to warrant individual nodes. |
@@ -283,7 +283,7 @@ DESIGN.md defines the proceed floor as *budget + primary_use_case*. The implemen
 
 - `derive_fitness_thresholds(brief)` — **one** upfront `call_structured` call returning a per-slot threshold dict (stored in build state as `ThresholdCache`, never re-derived per slot). This call uses a **stronger model** (`gpt-4o` via `KARMA_THRESHOLD_MODEL`, `temperature=0`) because the per-slot reasoning quality drives every downstream pick; the per-slot final pick stays on `gpt-4o-mini`. Determinism levers not yet pulled: no `seed=`, no `system_fingerprint` logging (§9).
 - `select_part(...)` — Step 1: Postgres fetch through the `_fetch_floor` choke point (band + in-stock + requirement floor + rejected-parts exclusion + PSU wattage floor on the PSU slot), escalating band → +20% widen → full catalog on empty; Step 2: Neo4j `compatibility_check` (hard) then `fitness_filter` (soft rank; skipped when `neo4j_available` is False); Step 3: `call_structured` final pick from a shortlist capped at 7, falling back to the top-ranked candidate on a hallucinated `product_id`.
-- `select_build(brief, price_bands)` — walks `SELECTION_ORDER` (GPU → CPU → RAM → Storage → Motherboard → PSU → Case → Cooler → Fans), skips `reuse_parts` with `action == "keep"`, tracks running budget, accumulates `locked_specs` (per-slot catalog specs) to compute the PSU wattage floor from locked GPU+CPU TDP, runs the (warn-only) motherboard lookahead probe after GPU+CPU lock, and runs the **blocking** compatibility validator after each lock.
+- `select_build(brief, price_bands)` — walks `SELECTION_ORDER` (GPU → CPU → Motherboard → RAM → Storage → PSU → Case → Cooler → Fans), skips `reuse_parts` with `action == "keep"`, tracks running budget, accumulates `locked_specs` (per-slot catalog specs) to compute the PSU wattage floor from locked GPU+CPU TDP, runs the (warn-only) motherboard lookahead probe after GPU+CPU lock, and runs the **blocking** compatibility validator after each lock.
 - **Graceful degradation (verified):** with Neo4j down *and* Postgres unreachable, `select_build` walks all nine slots, never crashes, and returns an empty `BuildCard` (every slot `None`). This is the designed degraded path — the funnel is structurally correct; only live data is missing. Note this failure is **silent, not loud** — check `scripts/test_db_connection.py` first when builds look empty.
 
 ### 8.2 LangGraph Wiring

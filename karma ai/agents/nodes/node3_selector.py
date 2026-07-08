@@ -1,7 +1,7 @@
 """Node 3 — Part Finder & Recommender.
 
 Selection sequence (locked, DESIGN.md §2.4):
-  GPU → CPU → RAM → Storage → Motherboard → PSU → Case → Cooler → Fans
+  GPU → CPU → Motherboard → RAM → Storage → PSU → Case → Cooler → Fans
 
 Per-slot three-step funnel:
   1. Catalog query  — Postgres get_parts_in_band (20% band-widening fallback)
@@ -45,9 +45,9 @@ logger = logging.getLogger(__name__)
 SELECTION_ORDER: list[ComponentSlot] = [
     ComponentSlot.gpu,
     ComponentSlot.cpu,
+    ComponentSlot.motherboard,
     ComponentSlot.ram,
     ComponentSlot.storage,
-    ComponentSlot.motherboard,
     ComponentSlot.psu,
     ComponentSlot.case,
     ComponentSlot.cooler,
@@ -224,6 +224,11 @@ def _ddr4_can_meet_ram_floor(brief: UserBuildBrief) -> bool:
     DDR4 would strand the RAM floor entirely (found by scripts/calibration_sweep.py).
     Fails open (True → old behaviour) when the catalog can't be read: with
     Postgres down, no candidates exist to bias anyway.
+
+    Note: with Motherboard now locked before RAM in SELECTION_ORDER, this bias
+    is additionally gated at the call site on the board not yet being locked
+    (see select_build) — it only fires as a fallback when the board slot itself
+    dead-ended, since RAM compatibility already resolves against a locked board.
     """
     try:
         req = resolve_requirements(brief)
@@ -427,9 +432,14 @@ def select_part(
         )
 
     # ── Step 1b: DDR4 preference bias (tight budget only) ───────────────────
-    # On a tight budget the RAM slot is selected before Motherboard, so an
-    # unbiased DDR5 pick can strand the board slot (DDR5 LGA1700 boards cost
-    # significantly more than DDR4 equivalents). Two-step logic:
+    # Motherboard now locks before RAM in SELECTION_ORDER, so RAM compatibility
+    # already resolves against a locked board's DDR generation (Step 2) — this
+    # bias only reaches here as a fallback when the board slot itself dead-ended
+    # (select_build gates ddr4_bias on ComponentSlot.motherboard not in
+    # locked_parts). In that fallback case, an unbiased DDR5 pick could still
+    # strand a later, independently-solved board slot toward a pricier DDR5
+    # board (DDR5 LGA1700 boards cost significantly more than DDR4 equivalents).
+    # Two-step logic:
     #   1. If no DDR4 exists in the current band, augment candidates with DDR4
     #      parts from [0, widened_high] — saving on RAM frees budget for the board.
     #   2. Stable DDR4-first reorder so the LLM shortlist sees DDR4 options first.
@@ -753,7 +763,11 @@ def select_build(
             neo4j_available=neo4j_available,
             req=req,
             remaining_budget=remaining_budget,
-            ddr4_bias=(ddr4_bias and slot == ComponentSlot.ram),
+            ddr4_bias=(
+                ddr4_bias
+                and slot == ComponentSlot.ram
+                and ComponentSlot.motherboard not in locked_parts
+            ),
             min_psu_wattage=min_psu_wattage,
         )
         if outcome.part is None:
