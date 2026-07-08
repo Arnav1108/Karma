@@ -9,6 +9,7 @@ Public API:
     newly_filled_sections(old_brief, new_brief) -> set[str]
     next_question(brief, asked_so_far) -> str | None
     extract_turn(user_answer, current_brief, conversation_history) -> UserBuildBrief
+    lock_brief(brief) -> UserBuildBrief
 """
 
 from __future__ import annotations
@@ -87,7 +88,6 @@ _EXTRACT_SYSTEM = (
 class _QuestionDef:
     id: str
     raw_text: str
-    is_final: bool = False
 
 
 QUESTION_SEQUENCE: list[_QuestionDef] = [
@@ -184,7 +184,6 @@ QUESTION_SEQUENCE: list[_QuestionDef] = [
             "Ask the user if they have any absolute must-haves or must-nots for this "
             "build — anything they would refuse to compromise on, no matter what."
         ),
-        is_final=True,
     ),
 ]
 
@@ -401,10 +400,10 @@ def next_question(
 # _is_exit_signal() — internal
 # ---------------------------------------------------------------------------
 
-_EXIT_PATTERN = re.compile(r"\b(done|stop)\b", re.IGNORECASE)
+_EXIT_PATTERN = re.compile(r"^(done|stop)$", re.IGNORECASE)
 
 def _is_exit_signal(user_answer: str) -> bool:
-    return bool(_EXIT_PATTERN.search(user_answer))
+    return bool(_EXIT_PATTERN.match(user_answer.strip()))
 
 # ---------------------------------------------------------------------------
 # _compute_completeness() — internal
@@ -488,6 +487,24 @@ def _merge_delta(
     return UserBuildBrief.model_validate(merged_data)
 
 # ---------------------------------------------------------------------------
+# lock_brief()
+# ---------------------------------------------------------------------------
+
+def lock_brief(brief: UserBuildBrief) -> UserBuildBrief:
+    """Transition a brief to status='locked', recomputing completeness.
+
+    Callers must check floor_met(brief) themselves before calling this — it does
+    not enforce the floor gate, it only performs the transition.
+    """
+    data = brief.model_dump()
+    data["status"] = "locked"
+    data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    completeness = _compute_completeness(brief)
+    data["completeness"] = completeness.model_dump()
+    data["completeness"]["required_complete"] = True
+    return UserBuildBrief.model_validate(data)
+
+# ---------------------------------------------------------------------------
 # extract_turn()
 # ---------------------------------------------------------------------------
 
@@ -508,13 +525,7 @@ def extract_turn(
     """
     # Step 0 — early-exit
     if _is_exit_signal(user_answer) and floor_met(current_brief):
-        data = current_brief.model_dump()
-        data["status"] = "locked"
-        data["updated_at"] = datetime.now(timezone.utc).isoformat()
-        completeness = _compute_completeness(current_brief)
-        data["completeness"] = completeness.model_dump()
-        data["completeness"]["required_complete"] = True
-        return UserBuildBrief.model_validate(data)
+        return lock_brief(current_brief)
 
     # Step 1 — build extraction prompt
     history_text = "\n".join(

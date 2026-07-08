@@ -2,9 +2,11 @@
 
 Topology (DESIGN.md §1 flowchart):
 
-    START → node_intake → node_feasibility
-                             ├─ comfortable/tight → node_allocate → node_select → END
-                             └─ impossible        → node_surface_failure        → END
+    START → node_intake ─┬─ (still asking)         → node_intake (loop)
+                          ├─ (locked)               → node_feasibility
+                          │                             ├─ comfortable/tight → node_allocate → node_select → END
+                          │                             └─ impossible        → node_surface_failure        → END
+                          └─ (exhausted, floor unmet) → node_cannot_proceed  → END
 
 node_intake is ONE TURN only — the conversation loop lives in run_pipeline.py.
 This graph is the engine; run_pipeline.py is the CLI driver.
@@ -22,7 +24,7 @@ from agents.state.pipeline_state import PipelineState
 # ---------------------------------------------------------------------------
 
 try:
-    from agents.nodes.node1_intake import extract_turn, next_question
+    from agents.nodes.node1_intake import extract_turn, floor_met, lock_brief, next_question
     _HAS_NODE1 = True
 except ImportError:
     _HAS_NODE1 = False
@@ -56,6 +58,12 @@ def node_intake(state: PipelineState) -> PipelineState:
 
     Designed for checkpointer resumption — the conversation loop in
     run_pipeline.py calls this node repeatedly until brief.status == 'locked'.
+
+    This function is the sole owner of the intake termination decision (via the
+    "current_node" key it returns); _route_after_intake just relays that decision.
+    It terminates one of three ways: loop back (still asking), hand off to
+    node_feasibility (locked, or exhausted with the floor met), or bail out to
+    node_cannot_proceed (exhausted with the floor unmet) — it never loops forever.
     """
     brief = state.get("current_brief")
     history = list(state.get("conversation_history") or [])
@@ -68,7 +76,22 @@ def node_intake(state: PipelineState) -> PipelineState:
 
     question = next_question(brief, set())
     if question is None:
-        return {"current_node": "node_feasibility"}  # type: ignore[return-value]
+        # Question sequence exhausted. Only proceed if the floor gate (budget +
+        # primary use case) is actually met — never silently lock a brief that
+        # fails it just to end the loop.
+        if floor_met(brief):
+            return {  # type: ignore[return-value]
+                "current_brief": lock_brief(brief),
+                "current_node": "node_feasibility",
+            }
+        return {  # type: ignore[return-value]
+            "error_message": (
+                "Cannot proceed: the intake question sequence is exhausted but "
+                "required information (budget and/or primary use case) is still "
+                "missing."
+            ),
+            "current_node": "node_cannot_proceed",
+        }
 
     # In graph mode, the harness supplies the user answer via state before
     # invoking this node.  Pull it from the last user turn in history.
@@ -187,6 +210,25 @@ def node_select(state: PipelineState) -> PipelineState:
     }
 
 
+def node_cannot_proceed(state: PipelineState) -> PipelineState:
+    """Terminal node: intake exhausted its question sequence without meeting the floor.
+
+    Reached when no further questions remain to ask but budget and/or primary use
+    case were never provided (e.g. extraction never filled them, or a caller drove
+    the graph with an already-partial, never-completing brief). Surfaces a message
+    and ends the run instead of looping back to node_intake forever.
+    """
+    existing_error = state.get("error_message")
+    message = existing_error or (
+        "Cannot proceed: the intake question sequence is exhausted but the "
+        "required information (budget and primary use case) was never provided."
+    )
+    return {  # type: ignore[return-value]
+        "error_message": message,
+        "current_node": "done",
+    }
+
+
 def node_surface_failure(state: PipelineState) -> PipelineState:
     """Format an error message for an impossible verdict or upstream failure."""
     verdict = state.get("feasibility_verdict")
@@ -219,10 +261,20 @@ def node_surface_failure(state: PipelineState) -> PipelineState:
 # Conditional routing
 # ---------------------------------------------------------------------------
 
-def _route_after_intake(state: PipelineState) -> Literal["node_feasibility", "node_intake"]:
-    brief = state.get("current_brief")
-    if brief is not None and getattr(brief, "status", None) == "locked":
-        return "node_feasibility"
+def _route_after_intake(
+    state: PipelineState,
+) -> Literal["node_feasibility", "node_intake", "node_cannot_proceed"]:
+    """Route based on node_intake's own decision (state["current_node"]).
+
+    node_intake is the sole place that decides whether to keep asking, hand off
+    to feasibility, or bail out to node_cannot_proceed — this router must not
+    re-derive that decision from brief.status, or it can disagree with node_intake
+    and loop back to it forever (e.g. when the question sequence is exhausted but
+    node_intake didn't/couldn't lock the brief).
+    """
+    current_node = state.get("current_node")
+    if current_node in ("node_feasibility", "node_cannot_proceed"):
+        return current_node
     return "node_intake"
 
 
@@ -245,13 +297,18 @@ builder.add_node("node_intake", node_intake)
 builder.add_node("node_feasibility", node_feasibility)
 builder.add_node("node_allocate", node_allocate)
 builder.add_node("node_select", node_select)
+builder.add_node("node_cannot_proceed", node_cannot_proceed)
 builder.add_node("node_surface_failure", node_surface_failure)
 
 builder.add_edge(START, "node_intake")
 builder.add_conditional_edges(
     "node_intake",
     _route_after_intake,
-    {"node_feasibility": "node_feasibility", "node_intake": "node_intake"},
+    {
+        "node_feasibility": "node_feasibility",
+        "node_intake": "node_intake",
+        "node_cannot_proceed": "node_cannot_proceed",
+    },
 )
 builder.add_conditional_edges(
     "node_feasibility",
@@ -260,6 +317,7 @@ builder.add_conditional_edges(
 )
 builder.add_edge("node_allocate", "node_select")
 builder.add_edge("node_select", END)
+builder.add_edge("node_cannot_proceed", END)
 builder.add_edge("node_surface_failure", END)
 
 karma_graph = builder.compile()
