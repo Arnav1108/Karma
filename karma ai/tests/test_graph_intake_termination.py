@@ -89,6 +89,7 @@ def test_node_intake_locks_and_routes_to_feasibility_when_exhausted_with_floor_m
     brief = _unlocked_brief_floor_unmet()
     data = brief.model_dump()
     data["budget"]["comfortable_max"] = 100000
+    data["purpose"]["sub_case"] = "1440p competitive gaming"
     from agents.schemas.brief import UserBuildBrief
     brief = UserBuildBrief.model_validate(data)
     assert floor_met(brief) is True

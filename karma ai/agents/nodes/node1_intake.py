@@ -308,7 +308,7 @@ def blank_brief(
 
 def floor_met(brief: UserBuildBrief) -> bool:
     """Return True when budget AND primary use case are filled (the proceed gate)."""
-    return brief.budget.comfortable_max > 0 and brief.purpose.primary_use_case is not None and brief.purpose.primary_use_case != ""
+    return brief.budget.comfortable_max > 0 and bool(brief.purpose.sub_case)
 
 # ---------------------------------------------------------------------------
 # _is_field_filled() — internal
