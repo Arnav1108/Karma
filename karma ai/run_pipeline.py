@@ -342,19 +342,32 @@ def run_intake(state: PipelineState) -> PipelineState:
     # asked_so_far: set of question IDs already put to the user this session.
     # next_question uses this (+ _is_field_filled) to skip already-covered ground.
     asked_so_far: set[str] = set()
+    # open_question_attempts / pending_open_question_field: same session lifetime
+    # as asked_so_far/conversation_history — state for the ask-if-ambiguous 3-ask
+    # mechanism. pending_open_question_field remembers which QUESTION_SEQUENCE id a
+    # currently-open clarification concerns, since once that id is in asked_so_far
+    # the plain "next unasked sequence item" walk would otherwise skip past it.
+    open_question_attempts: dict[str, int] = {}
+    pending_open_question_field: str | None = None
     turn_count = 0
 
     while True:
         brief = state["current_brief"]
 
         if _HAS_NODE1:
-            question = next_question(brief, asked_so_far)
-            # Identify which question ID is being asked — first in the ordered
-            # sequence not yet in asked_so_far (mirrors next_question's own walk).
-            current_q_id: str | None = next(
-                (q.id for q in QUESTION_SEQUENCE if q.id not in asked_so_far),
-                None,
-            )
+            question = next_question(brief, asked_so_far, open_question_attempts)
+            if brief.open_questions:
+                # An open question takes priority over QUESTION_SEQUENCE (see
+                # next_question) — it concerns whichever field was pending when
+                # first raised, not necessarily the next unasked sequence item.
+                current_q_id: str | None = pending_open_question_field
+            else:
+                # Identify which question ID is being asked — first in the ordered
+                # sequence not yet in asked_so_far (mirrors next_question's own walk).
+                current_q_id = next(
+                    (q.id for q in QUESTION_SEQUENCE if q.id not in asked_so_far),
+                    None,
+                )
         else:
             asked_count = len(asked_so_far)
             question = (
@@ -387,12 +400,16 @@ def run_intake(state: PipelineState) -> PipelineState:
 
         if _HAS_NODE1:
             old_brief = brief
-            # extract_turn(user_answer, current_brief, conversation_history) -> UserBuildBrief
-            # It also handles "done"/"stop" exit: locks the brief when floor is met.
+            had_open_question_before = bool(old_brief.open_questions)
+            # extract_turn(...) -> UserBuildBrief. Also handles "done"/"stop" exit
+            # (locks the brief when floor is met) and the open-question 3-ask state
+            # machine via current_question_id + open_question_attempts.
             brief = extract_turn(
                 user_input,
                 brief,
                 state.get("conversation_history") or [],
+                current_question_id=current_q_id,
+                open_question_attempts=open_question_attempts,
             )
             # Append user answer to history after extraction (it was context, not input).
             history = list(state.get("conversation_history") or [])
@@ -406,6 +423,14 @@ def run_intake(state: PipelineState) -> PipelineState:
             # Opportunistic fill: if the user volunteered answers to later questions,
             # mark those IDs as covered so they're skipped automatically.
             asked_so_far.update(newly_filled_sections(old_brief, brief))
+
+            # Track which field a freshly-raised open question concerns, so later
+            # turns (still-ambiguous / confirm / forced final attempt) keep passing
+            # the SAME current_question_id until it resolves.
+            if brief.open_questions and not had_open_question_before:
+                pending_open_question_field = current_q_id
+            elif not brief.open_questions:
+                pending_open_question_field = None
 
             # extract_turn locks the brief on "done"/"stop" when floor_met() is True.
             if brief.status == "locked":

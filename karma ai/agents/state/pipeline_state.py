@@ -20,6 +20,7 @@ class PipelineState(TypedDict, total=False):
     remaining_budget: int | None
     fitness_thresholds: dict[str, float] | None      # slot name → threshold
     fitness_thresholds_key: dict | None              # cache key used to derive fitness_thresholds
+    open_question_attempts: dict[str, int] | None    # open-question text → attempt count (ephemeral; not on the brief)
     error_message: str | None                    # for routing failures
     current_node: str | None
 
@@ -29,6 +30,7 @@ def new_state() -> PipelineState:
         conversation_history=[],
         locked_parts=None,
         fitness_thresholds=None,
+        open_question_attempts=None,
         error_message=None,
         current_node="node_intake",
     )
