@@ -13,3 +13,29 @@ gpu-010,Red Devil RX 7900 XTX 24GB,RX 7900 XTX,79.4,52.6,tomshardware_gpu_hierar
 gpu-006,RTX 4080 Super Gaming OC 16G,RTX 4080 Super,83.2,65.6,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
 gpu-012,RTX 5080 16G Gaming X Trio,RTX 5080,84.9,69.8,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
 gpu-007,ROG Strix RTX 4090 OC 24GB,RTX 4090,95.2,78.9,tomshardware_gpu_hierarchy_2026,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",direct
+gpu-015,Suprim X RTX 5090 32G,RTX 5090,100.0,88.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-016,ROG Astral RTX 5090 32GB OC,RTX 5090,100.0,88.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-039,GeForce RTX 5090 Gaming OC 32G,RTX 5090,100.0,88.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-040,RTX 5090 Solid OC 32GB,RTX 5090,100.0,88.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-017,ROG Strix RTX 5070 Ti 16GB OC,RTX 5070 Ti,74.5,56.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-018,GeForce RTX 5070 Ti Gaming OC 16G,RTX 5070 Ti,74.5,56.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-019,RTX 5060 Ti 16G Ventus 3X OC,RTX 5060 Ti 16GB,44.0,34.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-020,Dual RTX 5060 Ti 8GB OC,RTX 5060 Ti 8GB,43.5,33.5,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-021,RTX 5060 Ventus 2X 8G OC,RTX 5060,38.0,29.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-022,GeForce RTX 5070 Windforce OC 12G,RTX 5070,68.1,51.9,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-023,ROG Strix RTX 5080 16GB OC,RTX 5080,84.9,69.8,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-024,Twin Edge RTX 4060 8GB,RTX 4060,36.6,27.8,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-025,Prime RTX 4070 Super 12GB OC,RTX 4070 Super,67.2,50.7,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-026,RTX 3060 Gaming OC 12G,RTX 3060 12GB,30.0,22.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-027,RTX 3050 Eagle OC 8G,RTX 3050,22.0,16.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-028,Hellhound RX 9070 XT 16GB,RX 9070 XT,76.1,55.2,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-029,PULSE RX 9060 XT 16GB,RX 9060 XT 16GB,42.0,32.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-030,RX 9060 XT Gaming OC 8G,RX 9060 XT 8GB,41.5,31.5,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-031,Hellhound RX 7900 XT 20GB,RX 7900 XT,72.0,48.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-032,PULSE RX 7700 XT 12GB,RX 7700 XT,50.0,34.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-033,RX 7600 Eagle 8G,RX 7600,33.0,22.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-034,RX 6600 Eagle 8G,RX 6600,28.0,18.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-035,PULSE RX 6650 XT 8GB,RX 6650 XT,32.0,20.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-036,RX 6750 XT Challenger 12GB,RX 6750 XT,44.0,28.0,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-037,RX 7800 XT Gaming OC 16G,RX 7800 XT,56.9,38.8,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
+gpu-038,PULSE RX 9070 16GB,RX 9070,70.0,51.8,tomshardware_gpu_hierarchy_2026_interpolated,"https://www.tomshardware.com/reviews/gpu-hierarchy,4388.html",estimated
