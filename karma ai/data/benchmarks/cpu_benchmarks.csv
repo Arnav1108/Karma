@@ -11,3 +11,22 @@ cpu-011,Ryzen 9 7900X,Ryzen 9 7900X,69.2,88.5,67.4,"tomshardware_cpu_hierarchy_2
 cpu-007,Core Ultra 9 285K,Core Ultra 9 285K,71.8,98.5,88.7,tomshardware_cpu_hierarchy_2026,direct,
 cpu-005,Core i9-14900K,i9-14900K,78.2,95.4,83.9,tomshardware_cpu_hierarchy_2026,direct,
 cpu-012,Ryzen 9 7950X,Ryzen 9 7950X,71.0,85.2,88.0,tomshardware_cpu_hierarchy_2026,direct,
+cpu-013,Core i3-12100F,i3-12100F,42.0,68.0,13.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-014,Core i5-12400F,i5-12400F,52.0,70.0,30.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-015,Core i5-13400F,i5-13400F,58.0,74.0,37.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-016,Core i5-13600K,i5-13600K,70.0,84.0,52.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-017,Core i7-13700K,i7-13700K,74.0,88.0,72.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-018,Core Ultra 5 225F,Core Ultra 5 225F,60.0,82.0,40.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-019,Core Ultra 7 265K,Core Ultra 7 265K,71.0,95.0,72.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-020,Ryzen 5 5500,Ryzen 5 5500,45.0,62.0,18.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-021,Ryzen 5 5600,Ryzen 5 5600,57.0,67.0,20.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-022,Ryzen 7 5700X,Ryzen 7 5700X,60.0,68.0,35.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-023,Ryzen 7 5700X3D,Ryzen 7 5700X3D,74.0,66.0,34.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-024,Ryzen 7 5800X3D,Ryzen 7 5800X3D,78.0,70.0,38.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-025,Ryzen 5 7500F,Ryzen 5 7500F,66.0,70.0,30.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-026,Ryzen 7 7800X3D,Ryzen 7 7800X3D,92.0,78.0,42.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-027,Ryzen 5 9600X,Ryzen 5 9600X,70.0,88.0,40.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-028,Ryzen 7 9700X,Ryzen 7 9700X,74.0,90.0,52.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-029,Ryzen 7 9800X3D,Ryzen 7 9800X3D,96.0,88.0,55.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-030,Ryzen 9 9900X,Ryzen 9 9900X,73.0,91.0,78.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
+cpu-031,Ryzen 9 9950X,Ryzen 9 9950X,74.0,92.0,95.0,tomshardware_cpu_hierarchy_2026_interpolated,estimated,Ordinal placement on TH-2026 hierarchy between direct-measured anchors.
