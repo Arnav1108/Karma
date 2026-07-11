@@ -36,10 +36,11 @@ from agents.schemas.slots import ComponentSlot
 
 # ── Builders ──────────────────────────────────────────────────────────────────
 
-def _part(slot: ComponentSlot, pid: str, price: int) -> BuildCardPart:
+def _part(slot: ComponentSlot, pid: str, price: int,
+          brand: str | None = None) -> BuildCardPart:
     return BuildCardPart(
         slot=slot, product_id=pid, name=f"{slot.value} {pid}",
-        price_inr=price, justification="test",
+        price_inr=price, justification="test", brand=brand,
     )
 
 
@@ -169,6 +170,57 @@ def test_dispatch_additive_impossible_does_not_resolve(monkeypatch, budget_gamer
     result = dispatch_refinement(ops, brief, _bands(gpu=(20000, 25000, 30000)), _STUB_CARD, {})
     assert result.build_card is _STUB_CARD           # unchanged
     assert result.message and "impossible" in result.message.lower()
+
+
+# ── 1c. Exception leak guard (both patch-failure except blocks) ────────────────
+
+def test_additive_patch_failure_does_not_leak_exception_to_user(monkeypatch, budget_gamer_brief):
+    """A raising patch_brief_field must not put raw exception text in front of the user."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    card = _card([_part(ComponentSlot.gpu, "GPU-1", 25000)])
+
+    def _raise_sentinel(*a, **k):
+        raise ValueError("SENTINEL_PYDANTIC_TRACE")
+
+    monkeypatch.setattr(refine, "patch_brief_field", _raise_sentinel)
+
+    ops = RefinementOps(brief_edit={"field": "extras", "value": {"rgb_pref": "want_rgb"}})
+    result = dispatch_refinement(ops, brief, _bands(gpu=(20000, 25000, 30000)), card, {})
+
+    assert result.message is not None
+    assert "SENTINEL_PYDANTIC_TRACE" not in result.message, (
+        "raw exception text must not reach the user-facing message"
+    )
+    assert "extras" in result.message, "message should still name the field that failed"
+    assert result.build_card is card
+    assert result.accepted is False
+
+
+def test_structural_patch_failure_does_not_leak_exception_to_user(monkeypatch, budget_gamer_brief):
+    """A raising patch_brief_field must not leak exception text, and must return
+    before ever reaching run_from_brief — a failed patch must not restart."""
+    brief = budget_gamer_brief.model_copy(deep=True)
+    card = _card([_part(ComponentSlot.gpu, "GPU-1", 25000)])
+
+    def _raise_sentinel(*a, **k):
+        raise ValueError("SENTINEL_PYDANTIC_TRACE")
+
+    monkeypatch.setattr(refine, "patch_brief_field", _raise_sentinel)
+    monkeypatch.setattr(
+        "agents.graph_runner.run_from_brief",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not restart on a failed patch")),
+    )
+
+    ops = RefinementOps(restart_trigger={"field": "primary_use_case", "value": "not_a_real_use_case"})
+    result = dispatch_refinement(ops, brief, _bands(gpu=(20000, 25000, 30000)), card, {})
+
+    assert result.message is not None
+    assert "SENTINEL_PYDANTIC_TRACE" not in result.message, (
+        "raw exception text must not reach the user-facing message"
+    )
+    assert "primary_use_case" in result.message, "message should still name the field that failed"
+    assert result.build_card is card
+    assert result.accepted is False
 
 
 # ── 2. pin / reject / locked_parts round-trip ─────────────────────────────────
@@ -522,4 +574,85 @@ def test_dispatch_additive_extras_edit_preserves_fields_end_to_end(monkeypatch, 
     )
     assert result.brief.extras.rgb_pref == "minimal", (
         "rgb_pref must survive an extras edit that didn't mention it"
+    )
+
+
+# ── v2: set_preference brand-mismatch reject ──────────────────────────────────
+
+class _ComfortableVerdict:
+    verdict = "comfortable"
+    reason = "ok"
+
+
+def _stub_v2_resolve(monkeypatch):
+    """Stub the re-solve so dispatch_refinement_v2 needs no live catalog/LLM.
+
+    Feasibility returns comfortable; the pinned re-solve and incumbent-bias both
+    return the incoming card unchanged. The test only exercises the reject +
+    brief-patch path, not the re-solve itself.
+    """
+    monkeypatch.setattr(refine, "estimate_feasibility", lambda b: _ComfortableVerdict())
+    monkeypatch.setattr(refine, "_select_build_with_pins", lambda *a, **k: _STUB_CARD)
+    monkeypatch.setattr(refine, "diff_and_bias", lambda old, new, *a, **k: old)
+
+
+def test_set_preference_cpu_brand_rejects_mismatched_incumbent_via_real_brand_field(
+    monkeypatch, budget_gamer_brief
+):
+    """An 'amd' cpu brand preference rejects an incumbent whose real brand is Intel.
+
+    Proves _brand_mismatch reads BuildCardPart.brand (the real vendor column,
+    "Intel") for non-GPU slots — not name-sniffing — and that the mismatch
+    triggers apply_reject while the preference is durably persisted onto
+    ecosystem_prefs.cpu_brand_pref.
+    """
+    brief = budget_gamer_brief.model_copy(deep=True)
+    card = _card([_part(ComponentSlot.cpu, "CPU-INTEL-1", 16500, brand="Intel")])
+    _stub_v2_resolve(monkeypatch)
+
+    plan = refine.RefinementPlan(intents=[
+        refine.SetPreferenceIntent(slot=ComponentSlot.cpu, attribute="brand", value="amd"),
+    ])
+    locked: dict[str, str] = {}
+    result = refine.dispatch_refinement_v2(
+        plan, brief, _bands(cpu=(12000, 16500, 20000)), card, locked,
+    )
+
+    rejected_ids = {r.product_id for r in result.brief.hard_constraints.rejected_parts}
+    assert "CPU-INTEL-1" in rejected_ids, (
+        "Intel incumbent must be rejected when the cpu brand preference is amd"
+    )
+    assert result.brief.existing.ecosystem_prefs.cpu_brand_pref == "amd", (
+        "the cpu brand preference must be persisted onto ecosystem_prefs"
+    )
+
+
+def test_set_preference_cpu_brand_matching_incumbent_not_rejected(
+    monkeypatch, budget_gamer_brief
+):
+    """Non-vacuousness: an 'amd' preference does NOT reject an already-AMD incumbent.
+
+    Same flow as the mismatch test but the incumbent's real brand is AMD, so
+    _brand_mismatch must return False and apply_reject must NOT fire. This proves
+    the discriminator actually distinguishes match from mismatch rather than
+    always rejecting.
+    """
+    brief = budget_gamer_brief.model_copy(deep=True)
+    card = _card([_part(ComponentSlot.cpu, "CPU-AMD-1", 19500, brand="AMD")])
+    _stub_v2_resolve(monkeypatch)
+
+    plan = refine.RefinementPlan(intents=[
+        refine.SetPreferenceIntent(slot=ComponentSlot.cpu, attribute="brand", value="amd"),
+    ])
+    locked: dict[str, str] = {}
+    result = refine.dispatch_refinement_v2(
+        plan, brief, _bands(cpu=(12000, 16500, 20000)), card, locked,
+    )
+
+    rejected_ids = {r.product_id for r in result.brief.hard_constraints.rejected_parts}
+    assert "CPU-AMD-1" not in rejected_ids, (
+        "an already-AMD incumbent must NOT be rejected by an amd preference"
+    )
+    assert result.brief.existing.ecosystem_prefs.cpu_brand_pref == "amd", (
+        "the preference is still persisted even when no reject fires"
     )

@@ -11,6 +11,11 @@ class BuildCardPart(BaseModel):
     name: str
     price_inr: int
     justification: str
+    # Catalog vendor column. For CPU/RAM/etc. this is the real chip/product
+    # vendor ("Intel"/"AMD"); for GPU it's the AIB partner (Asus/MSI), NOT the
+    # chip vendor — so GPU brand-matching still name-sniffs (see
+    # node3_refinement._brand_mismatch). Defaults None for stub/legacy cards.
+    brand: str | None = None
 
 
 class BuildCard(BaseModel):
