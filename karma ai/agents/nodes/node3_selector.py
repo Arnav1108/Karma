@@ -639,6 +639,7 @@ def select_part(
             name=matched.get("name", matched["product_id"]),
             price_inr=int(matched.get("price_inr", 0)),
             justification=picked.justification,
+            brand=matched.get("brand"),
         ),
         status="ok",
         specs=matched.get("specs") if isinstance(matched.get("specs"), dict) else None,

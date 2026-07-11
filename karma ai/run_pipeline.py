@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import datetime
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -75,7 +76,9 @@ try:
     from agents.nodes.node3_refinement import (
         MAX_REFINEMENT_ROUNDS,
         dispatch_refinement,
+        dispatch_refinement_v2,
         parse_refinement_request,
+        parse_refinement_request_v2,
     )
     from agents.llm.client import StructuredCallError
     _HAS_REFINE = True
@@ -572,9 +575,13 @@ def run_refinement(state: PipelineState) -> PipelineState:
         print("  No parts to refine  -  skipping refinement loop.")
         return {**state, "locked_parts": {}, "current_node": "done"}
 
+    refinement_mode = os.getenv("KARMA_REFINEMENT_MODE", "legacy")
+    print(f"  [Refinement mode: {refinement_mode}]")
+
     locked_parts: dict[str, str] = {}
     cache = ThresholdCache()
     round_count = 0
+    history: list[dict] = []
 
     print("\n  You can refine the build below. Try: 'pin gpu', 'reject the psu',")
     print("  'set budget to 90k', 'target 1440p', or 'accept' to finalize.")
@@ -593,18 +600,37 @@ def run_refinement(state: PipelineState) -> PipelineState:
             print("  (Empty input  -  type 'accept' to finish, or describe a change.)")
             continue
 
-        try:
-            ops = parse_refinement_request(user_msg, brief, build_card)
-        except StructuredCallError as exc:
-            print(f"  [WARNING] Could not parse that request: {exc}")
-            continue
+        if refinement_mode == "intent":
+            try:
+                plan = parse_refinement_request_v2(user_msg, brief, build_card, history)
+            except StructuredCallError as exc:
+                print(f"  [WARNING] Could not parse that request: {exc}")
+                continue
 
-        try:
-            result = dispatch_refinement(ops, brief, bands, build_card, locked_parts, cache)
-        except Exception as exc:  # noqa: BLE001 — a bad round must not kill the session
-            print(f"  [WARNING] Refinement step failed ({type(exc).__name__}: {exc}).")
-            round_count += 1
-            continue
+            try:
+                result = dispatch_refinement_v2(plan, brief, bands, build_card, locked_parts, cache)
+            except Exception as exc:  # noqa: BLE001 — a bad round must not kill the session
+                print(f"  [WARNING] Refinement step failed ({type(exc).__name__}: {exc}).")
+                round_count += 1
+                continue
+
+            history.append({
+                "user_msg": user_msg,
+                "applied_intents": [i.model_dump(mode="json") for i in plan.intents],
+            })
+        else:
+            try:
+                ops = parse_refinement_request(user_msg, brief, build_card)
+            except StructuredCallError as exc:
+                print(f"  [WARNING] Could not parse that request: {exc}")
+                continue
+
+            try:
+                result = dispatch_refinement(ops, brief, bands, build_card, locked_parts, cache)
+            except Exception as exc:  # noqa: BLE001 — a bad round must not kill the session
+                print(f"  [WARNING] Refinement step failed ({type(exc).__name__}: {exc}).")
+                round_count += 1
+                continue
 
         brief = result.brief
         bands = result.price_bands

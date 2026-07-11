@@ -11,6 +11,7 @@ Public surface:
     StructuredCallError
     DEFAULT_MODEL
     THRESHOLD_MODEL
+    REFINEMENT_MODEL
 """
 
 from __future__ import annotations
@@ -33,6 +34,10 @@ DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # Stronger model reserved for calls whose reasoning quality drives every downstream pick
 # (currently: Node 3 fitness threshold derivation). See CLAUDE.md model allocation policy.
 THRESHOLD_MODEL = os.getenv("KARMA_THRESHOLD_MODEL", "gpt-4o")
+
+# Reserved for future refinement-loop calls; not yet wired into any call site.
+# Defaults to the same model the rest of the app uses (DEFAULT_MODEL).
+REFINEMENT_MODEL = os.getenv("KARMA_REFINEMENT_MODEL", DEFAULT_MODEL)
 
 T = TypeVar("T", bound=BaseModel)
 

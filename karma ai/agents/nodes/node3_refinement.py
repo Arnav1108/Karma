@@ -16,18 +16,19 @@ Dispatch precedence (DESIGN §2.4 / task §3):
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..db.neo4j import Neo4jClient
-from ..feasibility.catalog_floor import rejected_product_ids
+from ..feasibility.catalog_floor import _gpu_vendor, rejected_product_ids
 from ..feasibility.estimate import estimate_feasibility
 from ..feasibility.resolver import resolve_requirements
-from ..llm.client import call_structured
+from ..llm.client import REFINEMENT_MODEL, call_structured
 from ..nodes.node2_allocation import allocate_budget
 from ..nodes.node3_selector import (
     _BAND_WIDEN_FACTOR,
@@ -37,7 +38,7 @@ from ..nodes.node3_selector import (
     derive_fitness_thresholds,
     select_part,
 )
-from ..schemas.brief import RejectedPart, UserBuildBrief
+from ..schemas.brief import EcosystemPrefs, RejectedPart, UserBuildBrief
 from ..schemas.build_card import BuildCard, BuildCardPart
 from ..schemas.price_bands import PriceBands
 from ..schemas.slots import ComponentSlot
@@ -623,7 +624,10 @@ def dispatch_refinement(
             logger.warning("[Refine] structural patch of %r failed: %s", field_name, exc)
             return RefinementResult(
                 build_card=build_card, brief=brief, price_bands=price_bands,
-                message=f"Could not apply change to {field_name}: {exc}",
+                message=(
+                    f"I couldn't apply that change to {field_name} — it may not be a "
+                    "valid value for that field. Try rephrasing."
+                ),
             )
         # locked_parts and rejected_parts PERSIST across a restart (task §3).
         new_bands = allocate_budget(brief)
@@ -648,7 +652,10 @@ def dispatch_refinement(
             logger.warning("[Refine] additive patch of %r failed: %s", field_name, exc)
             return RefinementResult(
                 build_card=build_card, brief=brief, price_bands=price_bands,
-                message=f"Could not apply change to {field_name}: {exc}",
+                message=(
+                    f"I couldn't apply that change to {field_name} — it may not be a "
+                    "valid value for that field. Try rephrasing."
+                ),
             )
         changed = True
     if additive:
@@ -708,6 +715,464 @@ def dispatch_refinement(
 
     # ── 7. accept ───────────────────────────────────────────────────────────────
     if ops.accept:
+        return RefinementResult(
+            build_card=build_card, brief=brief, price_bands=price_bands,
+            accepted=True,
+            product_ids=[p.product_id for p in build_card.parts],
+        )
+
+    # Nothing actionable parsed.
+    return RefinementResult(
+        build_card=build_card, brief=brief, price_bands=price_bands,
+        message="No actionable change detected — try 'pin <slot>', 'reject <slot>', "
+                "a new budget, or 'accept'.",
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# v2 — intent-based refinement contract
+#
+# A NEW, additive contract selectable via KARMA_REFINEMENT_MODE=intent
+# (run_pipeline.run_refinement). The legacy RefinementOps / parse_refinement_
+# request / dispatch_refinement above are UNCHANGED and remain the default —
+# this section only ADDS parse_refinement_request_v2 / dispatch_refinement_v2,
+# built on the same pure helpers (patch_brief_field, rescale_budget,
+# apply_reject, _select_build_with_pins, diff_and_bias, route_field_edit).
+#
+# The difference from v1: a single user turn can carry an arbitrary NUMBER of
+# intents of an arbitrary MIX of kinds (v1 had one fixed op-slot per kind), and
+# a new `set_preference` kind captures a durable ecosystem brand preference
+# (persists across future re-solves) distinct from a one-time `reject`.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class SetPreferenceIntent(BaseModel):
+    kind: Literal["set_preference"] = "set_preference"
+    slot: ComponentSlot
+    attribute: Literal["brand"]   # extend later if more attributes are added
+    value: str
+    reason: str | None = None
+
+
+class EditFieldIntent(BaseModel):
+    kind: Literal["edit_field"] = "edit_field"
+    field: str
+    value: Any
+
+
+class StructuralIntent(BaseModel):
+    kind: Literal["structural"] = "structural"
+    field: str
+    value: Any
+
+
+class BudgetIntent(BaseModel):
+    kind: Literal["budget"] = "budget"
+    new_ceiling_inr: int
+
+
+class PinIntent(BaseModel):
+    kind: Literal["pin"] = "pin"
+    slot: ComponentSlot
+
+
+class RejectIntent(BaseModel):
+    kind: Literal["reject"] = "reject"
+    slot: ComponentSlot | None = None
+    product_id: str | None = None
+    reason: str | None = None
+
+
+class AcceptIntent(BaseModel):
+    kind: Literal["accept"] = "accept"
+
+
+RefinementIntent = Annotated[
+    Union[
+        SetPreferenceIntent,
+        EditFieldIntent,
+        StructuralIntent,
+        BudgetIntent,
+        PinIntent,
+        RejectIntent,
+        AcceptIntent,
+    ],
+    Field(discriminator="kind"),
+]
+
+
+class RefinementPlan(BaseModel):
+    intents: list[RefinementIntent] = []
+    reasoning: str = ""   # logged only, never shown to user
+
+
+def parse_refinement_request_v2(
+    user_input: str,
+    brief: UserBuildBrief,
+    build_card: BuildCard,
+    history: list[dict] | None = None,
+) -> RefinementPlan:
+    """LLM-classify a freeform refinement message into a RefinementPlan (v2).
+
+    Unlike v1's fixed one-op-per-kind `RefinementOps`, a single message may
+    populate ANY number of intents of ANY kind — "bump budget to 90k, give me
+    an amd card, and keep the case" is three intents in one plan.
+
+    Sees the FULL build card, the FULL brief as compact JSON (`brief.model_dump
+    (mode="json")` — not v1's hand-picked summary strings, so ecosystem_prefs /
+    existing / etc. are all visible to the model), and — when `history` is
+    supplied — the last few turns as {user_msg, applied_intents} pairs so the
+    model has continuity across rounds.
+    """
+    build_summary = "\n".join(
+        f"  {p.slot.value}: {p.name} (product_id={p.product_id}, ₹{p.price_inr:,})"
+        for p in build_card.parts
+    ) or "  (no parts selected)"
+
+    brief_json = json.dumps(brief.model_dump(mode="json"), indent=2, default=str)
+
+    history_block = ""
+    if history:
+        lines = []
+        for turn in history[-5:]:
+            lines.append(f'  user: "{turn.get("user_msg", "")}"')
+            lines.append(f"  applied_intents: {turn.get('applied_intents', [])}")
+        history_block = "\nRecent turns (most recent last):\n" + "\n".join(lines) + "\n"
+
+    prompt = f"""You are parsing a user's refinement request for a PC build recommendation
+into a RefinementPlan — a list of one or more typed intents.
+
+Current build:
+{build_summary}
+
+Full current brief (JSON):
+{brief_json}
+{history_block}
+User said: "{user_input}"
+
+Return a RefinementPlan JSON with an `intents` list. A single message MAY
+produce SEVERAL intents at once — emit one entry per distinct thing the user
+asked for. Put a short note in `reasoning` (logged only, never shown to the
+user).
+
+Each intent has a `kind` field that selects its shape:
+
+- "set_preference": a DURABLE ecosystem brand preference that should persist
+    across future re-solves (not just a one-time swap of the current part).
+    Fields: slot (enum), attribute (currently only "brand"), value (str),
+    reason (optional str).
+    Worked examples:
+      * "give me an AMD card instead" ->
+          {{"kind": "set_preference", "slot": "gpu", "attribute": "brand", "value": "amd"}}
+      * "switch to an intel cpu" ->
+          {{"kind": "set_preference", "slot": "cpu", "attribute": "brand", "value": "intel"}}
+    Use set_preference (NOT reject) whenever the user expresses a standing
+    brand preference, not just "I don't like this one specific part."
+
+- "edit_field": an ADDITIVE preference change to a non-structural brief field.
+    Fields: field (str), value (Any).
+    Use for: "software", "performance", "extras", "physical", "longevity".
+    Example: "target 1440p 144fps" ->
+      {{"kind": "edit_field", "field": "performance",
+        "value": {{"target_resolution": "1440p", "target_framerate": 144, "source": "user_stated"}}}}
+    IMPORTANT for "software": the user's EXISTING software list is merged in
+      automatically by name — value must be ONLY the new/changed entr(y/ies),
+      as a list of {{"name","category","frequency","intensity"}} objects. Do
+      NOT re-list software the user didn't mention this turn.
+    IMPORTANT for "extras": the user's EXISTING extras (rgb_pref, visual_style,
+      connectivity_needs, specific_part_requests) are merged in automatically —
+      value must contain ONLY the sub-field(s) that changed this turn.
+      `connectivity_needs` is UNIONED with the existing list, not replaced.
+
+- "structural": a STRUCTURAL change to requirements. Use ONLY for these fields:
+      • "primary_use_case" (value: gaming | content_creation | work_productivity |
+        storage_homeserver | general_use)
+      • "budget.scope" (value: pc_only | pc_plus_monitor | pc_plus_peripherals | full_setup)
+      • "existing.reuse_parts" (value: list of reuse-part objects)
+    Example: "actually this is for video editing now" ->
+      {{"kind": "structural", "field": "primary_use_case", "value": "content_creation"}}
+
+- "budget": a NEW TOTAL budget ceiling in INR.
+    Fields: new_ceiling_inr (int). "90k" -> 90000, "1.5 lakh" -> 150000.
+
+- "pin": user wants to KEEP one part and re-solve the rest.
+    Fields: slot (enum) — gpu, cpu, ram, storage, motherboard, psu, case, cooler, fans.
+    Example: "keep the GPU" -> {{"kind": "pin", "slot": "gpu"}}.
+
+- "reject": a ONE-TIME rejection of a specific part; find a replacement.
+    Fields: slot (optional enum), product_id (optional str, from the build
+    above), reason (optional str). Use this for "I don't like the GPU" or "the
+    PSU is too expensive" WITHOUT a durable brand preference behind it — if
+    the user names a brand they want instead, use set_preference, not reject.
+
+- "accept": the user is happy and wants to finalize. No extra fields.
+    Example: "looks good" / "ship it" -> {{"kind": "accept"}}.
+
+Return ONLY the JSON object."""
+
+    return call_structured(prompt, RefinementPlan, model=REFINEMENT_MODEL, temperature=0)
+
+
+# ── v2 brief-patch helper: dotted paths NOT in the legacy _FIELD_PATHS table ──
+
+# Derived from EcosystemPrefs's actual fields (currently cpu_brand_pref,
+# gpu_brand_pref) — NOT all nine ComponentSlots — so the table can't drift into
+# dead entries for slots the schema doesn't model.
+_FIELD_PATHS_V2: dict[str, tuple[str, ...]] = {
+    f"ecosystem_prefs.{field_name}": ("existing", "ecosystem_prefs", field_name)
+    for field_name in EcosystemPrefs.model_fields
+}
+
+
+def patch_brief_field_v2(brief: UserBuildBrief, field_name: str, value: Any) -> UserBuildBrief:
+    """v2-only sibling of `patch_brief_field` for fields outside the legacy table.
+
+    Looks up `field_name` in `_FIELD_PATHS_V2` first (currently just the
+    ecosystem brand-preference paths used by set_preference), falling back to
+    the legacy `_FIELD_PATHS` table so v2 dispatch can still route ordinary
+    edit_field/structural intents through the same dotted-path resolution.
+    Scalar replace only — no merge semantics, since every v2-only path so far
+    (`*_brand_pref`) is a plain string field. Legacy `patch_brief_field` is
+    untouched and remains the only patcher the v1 path calls.
+    """
+    data = brief.model_dump(mode="python")
+    path = _FIELD_PATHS_V2.get(field_name) or _FIELD_PATHS.get(field_name, (field_name,))
+    ref = data
+    for key in path[:-1]:
+        ref = ref[key]
+    ref[path[-1]] = value
+    return UserBuildBrief.model_validate(data)
+
+
+def _brand_mismatch(part: BuildCardPart, value: str) -> bool:
+    """True if `part`'s brand does not match `value` (case-insensitive).
+
+    Two signals, by slot:
+      - GPU: the catalog's `brand` column is the AIB partner (Asus/MSI), NOT the
+        chip vendor, so we infer NVIDIA/AMD from the product name via the shared
+        catalog_floor._gpu_vendor heuristic — the single source of truth. UNKNOWN
+        inference => no mismatch (don't reject on a guess).
+      - Every other slot (cpu, ram, …): `part.brand` IS the real vendor, so we
+        compare it directly. If it's None (a stub/legacy card predating the
+        BuildCardPart.brand field), we cannot determine the brand — assume no
+        mismatch rather than fall back to unreliable name-sniffing.
+    """
+    value_upper = value.strip().upper()
+    if part.slot == ComponentSlot.gpu:
+        vendor = _gpu_vendor({"name": part.name})
+        return vendor != "UNKNOWN" and vendor != value_upper
+    if part.brand is None:
+        logger.warning(
+            "[Refine v2] %s part %r has no brand — cannot check brand preference %r; "
+            "assuming no mismatch",
+            part.slot.value, part.product_id, value,
+        )
+        return False
+    return part.brand.strip().upper() != value_upper
+
+
+def _gather_field_edits_v2(
+    plan: RefinementPlan,
+) -> list[tuple[str, Any, Literal["edit_field", "structural"]]]:
+    """Collect (field, value, declared_kind) from edit_field/structural intents.
+
+    Deduped by field, first occurrence wins — mirrors legacy `_gather_field_
+    edits`. Routing into additive/structural buckets is decided downstream by
+    `route_field_edit`, NOT by `declared_kind` — this is only kept around so a
+    mismatch between the LLM's tag and the routing table can be logged.
+    """
+    edits: list[tuple[str, Any, Literal["edit_field", "structural"]]] = []
+    seen: set[str] = set()
+    for intent in plan.intents:
+        if isinstance(intent, (EditFieldIntent, StructuralIntent)):
+            if intent.field in seen:
+                continue
+            seen.add(intent.field)
+            edits.append((intent.field, intent.value, intent.kind))  # type: ignore[arg-type]
+    return edits
+
+
+def dispatch_refinement_v2(
+    plan: RefinementPlan,
+    brief: UserBuildBrief,
+    price_bands: PriceBands,
+    build_card: BuildCard,
+    locked_parts: dict[str, str],
+    cache: ThresholdCache | None = None,
+) -> RefinementResult:
+    """Apply one turn's intents in the fixed precedence (v2).
+
+    Precedence: structural (skip rest) -> additive edits incl. set_preference
+    (feasibility recheck) -> budget -> pin -> reject -> re-solve if anything
+    changed -> accept -> fallback "no actionable change" message. Multiple
+    intents in one plan all apply — `changed` accumulates across every one of
+    them before deciding whether to re-solve, which is the whole point of
+    moving off v1's single-op-per-bucket shape.
+
+    Reuses the same pure helpers as `dispatch_refinement` (v1), unchanged:
+    patch_brief_field, _merge_list_field, _merge_extras_field, rescale_budget,
+    apply_reject, _select_build_with_pins, diff_and_bias, route_field_edit.
+    """
+    if cache is None:
+        cache = ThresholdCache()
+
+    field_edits = _gather_field_edits_v2(plan)
+    structural: list[tuple[str, Any]] = []
+    additive: list[tuple[str, Any]] = []
+    for field_name, value, declared_kind in field_edits:
+        actual_bucket = route_field_edit(field_name)
+        declared_bucket = "structural" if declared_kind == "structural" else "additive"
+        if actual_bucket != declared_bucket:
+            logger.warning(
+                "[Refine v2] field %r: route_field_edit says %r but the LLM tagged "
+                "this intent kind=%r — following route_field_edit",
+                field_name, actual_bucket, declared_kind,
+            )
+        if actual_bucket == "structural":
+            structural.append((field_name, value))
+        else:
+            additive.append((field_name, value))
+
+    set_preferences = [i for i in plan.intents if isinstance(i, SetPreferenceIntent)]
+    budget_intents = [i for i in plan.intents if isinstance(i, BudgetIntent)]
+    pin_intents = [i for i in plan.intents if isinstance(i, PinIntent)]
+    reject_intents = [i for i in plan.intents if isinstance(i, RejectIntent)]
+    accept = any(isinstance(i, AcceptIntent) for i in plan.intents)
+
+    # ── 1. structural (patch, restart, skip everything else) ────────────────────
+    if structural:
+        field_name, value = structural[0]
+        try:
+            brief = patch_brief_field(brief, field_name, value)
+        except Exception as exc:  # noqa: BLE001 — bad LLM value must not crash the loop
+            logger.warning("[Refine v2] structural patch of %r failed: %s", field_name, exc)
+            return RefinementResult(
+                build_card=build_card, brief=brief, price_bands=price_bands,
+                message=(
+                    f"I couldn't apply that change to {field_name} — it may not be a "
+                    "valid value for that field. Try rephrasing."
+                ),
+            )
+        new_bands = allocate_budget(brief)
+        from ..graph_runner import run_from_brief  # lazy: avoids graph import at module load
+
+        final_state = run_from_brief(brief, new_bands)
+        new_card = final_state.get("build_card") or build_card
+        return RefinementResult(
+            build_card=new_card,
+            brief=final_state.get("current_brief", brief),
+            price_bands=final_state.get("price_bands", new_bands),
+            message=f"Restarted after structural change to {field_name}.",
+        )
+
+    changed = False
+
+    # ── 2. additive edits (edit_field) ───────────────────────────────────────────
+    for field_name, value in additive:
+        try:
+            brief = patch_brief_field(brief, field_name, value)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Refine v2] additive patch of %r failed: %s", field_name, exc)
+            return RefinementResult(
+                build_card=build_card, brief=brief, price_bands=price_bands,
+                message=(
+                    f"I couldn't apply that change to {field_name} — it may not be a "
+                    "valid value for that field. Try rephrasing."
+                ),
+            )
+        changed = True
+
+    # ── 2b. set_preference (additive: durable brand pref + drop mismatched pick) ─
+    for sp in set_preferences:
+        dotted_field = f"ecosystem_prefs.{sp.slot.value}_brand_pref"
+        try:
+            brief = patch_brief_field_v2(brief, dotted_field, sp.value)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Refine v2] set_preference patch of %r failed: %s", dotted_field, exc)
+            return RefinementResult(
+                build_card=build_card, brief=brief, price_bands=price_bands,
+                message=(
+                    "I couldn't apply that brand preference — it may not be a valid "
+                    "value. Try rephrasing."
+                ),
+            )
+        changed = True
+
+        current_part = next((p for p in build_card.parts if p.slot == sp.slot), None)
+        if current_part is not None and _brand_mismatch(current_part, sp.value):
+            try:
+                brief = apply_reject(
+                    brief, current_part.product_id, sp.reason or "brand preference change"
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[Refine v2] apply_reject of %r for brand preference failed: %s",
+                    current_part.product_id, exc,
+                )
+                return RefinementResult(
+                    build_card=build_card, brief=brief, price_bands=price_bands,
+                    message="I couldn't apply that brand preference — try rephrasing.",
+                )
+            locked_parts.pop(sp.slot.value, None)  # a rejected slot can't stay pinned
+
+    if additive or set_preferences:
+        verdict = estimate_feasibility(brief)
+        if verdict.verdict == "impossible":
+            # Do NOT re-solve this turn (mirrors v1 §3).
+            return RefinementResult(
+                build_card=build_card, brief=brief, price_bands=price_bands,
+                message=(
+                    "That change makes the build impossible within budget: "
+                    f"{verdict.reason} — reverting is up to you; not re-solving this turn."
+                ),
+            )
+
+    # ── 3. budget ─────────────────────────────────────────────────────────────────
+    if budget_intents:
+        brief = rescale_budget(brief, budget_intents[-1].new_ceiling_inr)
+        price_bands = allocate_budget(brief)
+        changed = True
+
+    # ── 4. pin ────────────────────────────────────────────────────────────────────
+    for pin_intent in pin_intents:
+        part = next((p for p in build_card.parts if p.slot == pin_intent.slot), None)
+        if part is not None:
+            locked_parts[pin_intent.slot.value] = part.product_id
+            changed = True
+        else:
+            logger.warning(
+                "[Refine v2] pin %s: slot not in current build card", pin_intent.slot.value
+            )
+
+    # ── 5. reject ─────────────────────────────────────────────────────────────────
+    for r in reject_intents:
+        product_id = r.product_id
+        if not product_id and r.slot is not None:
+            part = next((p for p in build_card.parts if p.slot == r.slot), None)
+            product_id = part.product_id if part else None
+        if product_id:
+            try:
+                brief = apply_reject(brief, product_id, r.reason)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[Refine v2] apply_reject of %r failed: %s", product_id, exc)
+                return RefinementResult(
+                    build_card=build_card, brief=brief, price_bands=price_bands,
+                    message="I couldn't apply that rejection — try rephrasing.",
+                )
+            if r.slot is not None:
+                locked_parts.pop(r.slot.value, None)  # a rejected slot can't stay pinned
+            changed = True
+        else:
+            logger.warning("[Refine v2] reject: could not resolve a product_id to reject")
+
+    # ── 6. re-solve (incumbent-biased) ───────────────────────────────────────────
+    if changed:
+        pinned = _pinned_parts_from_locked(locked_parts, build_card)
+        candidate = _select_build_with_pins(brief, price_bands, pinned, cache=cache)
+        biased = diff_and_bias(build_card, candidate, locked_parts, brief, price_bands)
+        return RefinementResult(build_card=biased, brief=brief, price_bands=price_bands)
+
+    # ── 7. accept ─────────────────────────────────────────────────────────────────
+    if accept:
         return RefinementResult(
             build_card=build_card, brief=brief, price_bands=price_bands,
             accepted=True,
