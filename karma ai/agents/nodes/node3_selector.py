@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from ..db.neo4j import Neo4jClient
 from ..db.postgres import PostgresClient
 from ..feasibility.catalog_floor import (
+    _gpu_vendor,
     filter_rejected,
     required_psu_wattage,
     slot_requirement_filter,
@@ -251,6 +252,53 @@ def _ddr4_first(candidates: list[dict]) -> list[dict]:
     ddr4 = [c for c in candidates if _get_ddr_gen(c) == 4]
     rest = [c for c in candidates if _get_ddr_gen(c) != 4]
     return ddr4 + rest
+
+
+def _brand_ranked_candidates(
+    slot: ComponentSlot,
+    candidates: list[dict],
+    brief: UserBuildBrief,
+) -> tuple[list[dict], bool]:
+    """Stable reorder: candidates matching the brief's stated brand preference
+    for this slot go first, everything else after. Returns (reordered, was_applied).
+
+    Mirrors _ddr4_first exactly — a soft, fail-open bias, never a hard filter
+    (consistent with _floor_filter's enforce_brand=False: ecosystem brand prefs
+    are preferences, not floors). Only gpu/cpu are modeled since those are the
+    only two slots EcosystemPrefs covers.
+
+    was_applied is False (list unchanged) when: slot isn't gpu/cpu, no
+    preference is set for this slot, or the preference is set but zero
+    candidates match it — reordering toward a brand with no available option
+    would only bury the shortlist behind a bias that helps no one.
+    """
+    if slot == ComponentSlot.gpu:
+        pref = brief.existing.ecosystem_prefs.gpu_brand_pref
+    elif slot == ComponentSlot.cpu:
+        pref = brief.existing.ecosystem_prefs.cpu_brand_pref
+    else:
+        return candidates, False
+
+    if not pref:
+        return candidates, False
+
+    pref_upper = pref.upper()
+    if slot == ComponentSlot.gpu:
+        matched = [c for c in candidates if _gpu_vendor(c) == pref_upper]
+    else:
+        matched = [c for c in candidates if (c.get("brand") or "").upper() == pref_upper]
+
+    if not matched:
+        logger.info(
+            "[Node3] %s: brand preference %r has no in-band/in-catalog candidate "
+            "right now — skipping brand bias (fail-open)",
+            slot.value, pref,
+        )
+        return candidates, False
+
+    matched_ids = {c["product_id"] for c in matched}
+    rest = [c for c in candidates if c["product_id"] not in matched_ids]
+    return matched + rest, True
 
 
 def _compatible_subset(
@@ -564,6 +612,19 @@ def select_part(
                 slot.value, threshold, len(working),
             )
 
+    # ── Step 2d: brand preference bias (relaxable — fail-open, never a hard cut) ─
+    # Mirrors Step 2c exactly: a stable reorder applied on top of whatever order
+    # fitness ranking produced, so brand-preferred candidates sort first while
+    # fitness order is preserved within each group (brand-first groups, THEN
+    # within-group fitness order, THEN slice below) — never fitness-first-then-
+    # brand, which could starve a brand match past the shortlist cutoff.
+    brand_pref = (
+        brief.existing.ecosystem_prefs.gpu_brand_pref if slot == ComponentSlot.gpu
+        else brief.existing.ecosystem_prefs.cpu_brand_pref if slot == ComponentSlot.cpu
+        else None
+    )
+    working, brand_ranked = _brand_ranked_candidates(slot, working, brief)
+
     shortlist_dicts = working[:_MAX_SHORTLIST]
 
     # ── Step 3: LLM final pick ────────────────────────────────────────────────
@@ -600,6 +661,11 @@ def select_part(
             f"price) — weigh fitness rank alongside price/specs; don't default to a "
             f"lower-ranked option purely because it's cheaper, but it can still win on "
             f"genuine value.\n"
+        )
+    if brand_ranked:
+        fitness_context += (
+            f"  Additionally, options matching the user's stated {slot.value} brand "
+            f"preference ({brand_pref}) are listed first.\n"
         )
 
     prompt = (

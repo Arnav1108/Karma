@@ -17,7 +17,11 @@ import pytest
 
 from agents.db.postgres import PostgresClient
 from agents.feasibility.resolver import resolve_requirements
-from agents.nodes.node3_selector import _FULL_CATALOG_HIGH, _fetch_floor
+from agents.nodes.node3_selector import (
+    _FULL_CATALOG_HIGH,
+    _brand_ranked_candidates,
+    _fetch_floor,
+)
 from agents.schemas.brief import RejectedPart
 from agents.schemas.slots import ComponentSlot
 
@@ -93,3 +97,96 @@ def test_fetch_floor_rejection_is_slot_scoped(budget_gamer_brief, db_available):
         "rejecting a GPU product_id changed the RAM candidate count -- "
         "exclusion is not correctly slot-scoped"
     )
+
+
+# ── _brand_ranked_candidates ────────────────────────────────────────────────
+#
+# Pure unit tests -- plain dicts + a brief, no Postgres/Neo4j required.
+
+_CPU_CANDIDATES = [
+    {"product_id": "C1", "brand": "Intel"},
+    {"product_id": "C2", "brand": "AMD"},
+    {"product_id": "C3", "brand": "Intel"},
+    {"product_id": "C4", "brand": "AMD"},
+]
+
+
+def test_brand_ranked_cpu_preference_reorders_matches_first(budget_gamer_brief):
+    brief = budget_gamer_brief.model_copy(deep=True)
+    brief.existing.ecosystem_prefs.cpu_brand_pref = "AMD"
+
+    result, was_applied = _brand_ranked_candidates(
+        ComponentSlot.cpu, _CPU_CANDIDATES, brief
+    )
+
+    assert was_applied is True
+    result_ids = [c["product_id"] for c in result]
+    assert result_ids == ["C2", "C4", "C1", "C3"], (
+        "expected AMD matches (C2, C4) first, Intel (C1, C3) after, with "
+        "original relative order preserved within each brand group -- got "
+        f"{result_ids}"
+    )
+
+
+def test_brand_ranked_no_preference_set_is_noop(budget_gamer_brief):
+    brief = budget_gamer_brief.model_copy(deep=True)
+    brief.existing.ecosystem_prefs.cpu_brand_pref = None
+
+    result, was_applied = _brand_ranked_candidates(
+        ComponentSlot.cpu, _CPU_CANDIDATES, brief
+    )
+
+    assert was_applied is False
+    assert result == _CPU_CANDIDATES
+
+
+def test_brand_ranked_preference_set_but_no_matching_candidate_fails_open(
+    budget_gamer_brief,
+):
+    brief = budget_gamer_brief.model_copy(deep=True)
+    brief.existing.ecosystem_prefs.cpu_brand_pref = "AMD"
+
+    all_intel = [
+        {"product_id": "C1", "brand": "Intel"},
+        {"product_id": "C3", "brand": "Intel"},
+    ]
+
+    result, was_applied = _brand_ranked_candidates(ComponentSlot.cpu, all_intel, brief)
+
+    assert was_applied is False
+    assert result == all_intel
+
+
+def test_brand_ranked_gpu_uses_shared_vendor_inference(budget_gamer_brief):
+    brief = budget_gamer_brief.model_copy(deep=True)
+    brief.existing.ecosystem_prefs.gpu_brand_pref = "AMD"
+
+    gpu_candidates = [
+        {"product_id": "G1", "name": "ASUS ROG RTX 4070"},
+        {"product_id": "G2", "name": "Sapphire Pulse RX 7800 XT"},
+    ]
+
+    result, was_applied = _brand_ranked_candidates(
+        ComponentSlot.gpu, gpu_candidates, brief
+    )
+
+    assert was_applied is True
+    assert result[0]["product_id"] == "G2"
+
+
+def test_brand_ranked_non_gpu_cpu_slot_is_always_noop(budget_gamer_brief):
+    brief = budget_gamer_brief.model_copy(deep=True)
+    brief.existing.ecosystem_prefs.cpu_brand_pref = "AMD"
+    brief.existing.ecosystem_prefs.gpu_brand_pref = "AMD"
+
+    ram_candidates = [
+        {"product_id": "R1", "brand": "Corsair"},
+        {"product_id": "R2", "brand": "AMD"},
+    ]
+
+    result, was_applied = _brand_ranked_candidates(
+        ComponentSlot.ram, ram_candidates, brief
+    )
+
+    assert was_applied is False
+    assert result == ram_candidates
