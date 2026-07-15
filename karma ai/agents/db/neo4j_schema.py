@@ -5,13 +5,6 @@ apply_schema(driver) is idempotent: safe to call on every deploy (IF NOT EXISTS
 requires Neo4j 4.4+; Neo4j 5.x is assumed).
 """
 
-# ── Node label constants ──────────────────────────────────────────────────────
-COMPONENT       = "Component"
-SPEC            = "Spec"
-USE_CASE        = "UseCase"
-PERFORMANCE     = "Performance"
-COMPONENT_CLASS = "ComponentClass"
-
 # ── Uniqueness / node-key constraints ─────────────────────────────────────────
 
 CONSTRAINT_COMPONENT_PRODUCT_ID = (

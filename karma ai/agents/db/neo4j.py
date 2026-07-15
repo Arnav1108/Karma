@@ -327,34 +327,3 @@ class Neo4jClient:
             is_real_ranking=bool(scored),
         )
 
-    def get_component_fitness(
-        self,
-        product_id: str,
-        use_case: str,
-    ) -> Optional[float]:
-        """
-        Return the GOOD_FOR edge score between a component and a use case.
-
-        Returns the continuous score (not the coarse tier) since this is the
-        finer-grained value external callers would want.
-
-        Args:
-            product_id: Component's product ID.
-            use_case: Target use-case name matching UseCase.name in the graph.
-
-        Returns:
-            Edge score as float, or None if no edge exists or component is absent.
-        """
-        try:
-            driver = _get_driver()
-            with driver.session() as session:
-                record = session.run(
-                    _FITNESS_SINGLE_QUERY,
-                    product_id=product_id,
-                    use_case=use_case,
-                ).single()
-                if record is None or record["score"] is None:
-                    return None
-                return float(record["score"])
-        except Exception:
-            return None

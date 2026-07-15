@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import UUID
@@ -203,9 +203,6 @@ QUESTION_SEQUENCE: list[_QuestionDef] = [
         ),
     ),
 ]
-
-# Set of question IDs that correspond to source-flagged brief sections.
-_SOURCE_FLAGGED_IDS = {"performance", "monitor", "storage", "operating_system"}
 
 # ---------------------------------------------------------------------------
 # Ask-if-ambiguous open-question mechanism (DESIGN.md §2.1 / §9)
