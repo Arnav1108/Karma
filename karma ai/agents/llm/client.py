@@ -35,7 +35,8 @@ DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 # (currently: Node 3 fitness threshold derivation). See CLAUDE.md model allocation policy.
 THRESHOLD_MODEL = os.getenv("KARMA_THRESHOLD_MODEL", "gpt-4o")
 
-# Reserved for future refinement-loop calls; not yet wired into any call site.
+# Used by node3_refinement.py's v2 intent-based refinement parsing
+# (parse_refinement_request_v2), active when KARMA_REFINEMENT_MODE=intent.
 # Defaults to the same model the rest of the app uses (DEFAULT_MODEL).
 REFINEMENT_MODEL = os.getenv("KARMA_REFINEMENT_MODEL", DEFAULT_MODEL)
 
