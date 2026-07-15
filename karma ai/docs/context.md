@@ -1,3 +1,21 @@
+## Karma Advisor — state as of 2026-07-11
+
+**Phases 5–8 shipped since the 2026-07-04 snapshot below (all merged to `main`).**
+- **Phase 5 — catalog expansion** (`phase5/catalog-expansion`, `bbc29ab`): catalog
+  grown to 189 products (current + previous gen, 4 sockets, DDR4/5) via
+  `data/catalog/seed_expansion.sql`.
+- **Phase 6 — refinement redesign** (`phase6/refinement-redesign`, `0bd3ba1`):
+  new intent-based v2 refinement contract (`parse_refinement_request_v2`),
+  gated behind `KARMA_REFINEMENT_MODE=intent` / `KARMA_REFINEMENT_MODEL`,
+  alongside the legacy parser. Integration coverage added for the
+  `run_refinement` loop and `ThresholdCache` cache-hit path.
+- **Phase 7 — brand-preference bias** (`phase7/selector-brand-bias`, `e86cb8c`):
+  fail-open brand-preference reorder added to `select_part` in
+  `node3_selector.py`.
+- **Phase 8 — e2e refinement test** (`phase8/e2e-refinement-test`, `7439406`):
+  first un-mocked, live end-to-end refinement test (DESIGN §9a), exercising a
+  real multi-round refinement loop rather than a mocked one.
+
 ## Karma Advisor — state as of 2026-07-04
 
 **Feasibility verdict investigation: both open questions CLOSED (2026-07-04),
@@ -120,17 +138,23 @@ no code changes. Do not re-open these as mysteries.**
 - 10/10 integration tests pass.
 
 ## Open items, priority order
-1. **Fitness/GOOD_FOR weights** — still stubbed from placeholder table, not
-   real benchmark data (separate edge family from compatibility). Note the
-   CPU-tier→min-cores map in catalog_floor._TIER_MIN_CORES is also a stub proxy
-   (no tier column in the catalog); it is now a HARD filter in Node 3, so
-   replacing it with real data is higher-stakes than before.
+1. **Fitness/GOOD_FOR weights — RESOLVED (2026-07-04, `1dc9f32`).** GPU/CPU
+   `GOOD_FOR` edges reseeded from real benchmark-derived tier/score data
+   (`data/benchmarks/cpu_benchmarks.csv`, `gpu_benchmarks.csv`, seeded via
+   `data/graph/seed_fitness_benchmarks.py`), replacing the placeholder table.
+   Same underlying fix as open items 4/5 below. Residual, narrower stub not
+   covered by this fix: `catalog_floor._TIER_MIN_CORES` (`CpuTier → min cores`)
+   is still a hard-coded proxy map, not a real catalog column — lower
+   priority now that benchmark data covers the fitness signal itself, but
+   still a stub if picked up later.
 2. **Aura migration** — infra is local Docker only, not reachable by deployed
    backend; required pre-production (env swap only, seed is idempotent)
-3. **Verdict provenance** — add `basis: deterministic | llm_fallback` to
-   FeasibilityVerdict so the silent Postgres-unreachable fallback is
-   distinguishable in output (ticket drafted 2026-07-04, see verdict
-   investigation above; implementation deferred to a separate session)
+3. **Verdict provenance — RESOLVED (2026-07-06, `68f7b53`).** `FeasibilityVerdict`
+   carries `basis: deterministic | llm_fallback | stub` (already set correctly
+   everywhere per the 2026-07-04 investigation above); `_print_verdict` in
+   `run_pipeline.py` now displays it inline on the Verdict line as
+   `[basis: <value>]`, so a silent Postgres-unreachable fallback is visible to
+   anyone running the pipeline, not just inspectable in code.
 4. **Gaming fitness threshold calibration — RESOLVED (2026-07-04,
    `phase4/fitness-filter-softgate`).** Root cause confirmed via live
    diagnostics against all 7 fixtures + a new `high_end_gamer` control fixture:

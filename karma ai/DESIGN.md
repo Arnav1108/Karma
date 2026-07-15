@@ -2,9 +2,9 @@
 
 > Living design document for the Karma ai recommendation pipeline (Karma Computers).
 > **Status legend:** 🔒 Locked · 🛠️ Implemented · 🚧 In design · ❓ Open
-> _Last updated: 2026-07-07 (full-system audit reconciliation, verified section-by-section against source, the live Postgres catalog, and the live Neo4j graph; refreshed to include the PSU-wattage and rejected-parts-consistency fixes)_
+> _Last updated: 2026-07-15 (second full-system audit reconciliation — re-verified section-by-section against current source. Closes out the 2026-07-07 audit's stale claims: Node 1's ask-if-ambiguous/open-questions/inferred-flag/exit-regex/graph-loop gaps are fixed; the Node 2 software-spec stub is replaced by `agents/software_specs.py`; Node 3's fitness-threshold call is now scoped to gpu/cpu only; the end-to-end test gap is closed (`tests/e2e/`); `postgres.py`'s missing `load_dotenv()`, the duplicate `get_driver`, and the empty `agents/harness`/`agents/tools` packages are all resolved. Also documents the new v2 intent-based refinement system (`KARMA_REFINEMENT_MODE=intent`, durable brand-preference bias) that shipped alongside v1. Fitness edge/part counts and the test-pass count below are carried forward unchanged from 2026-07-07, pending a fresh live-DB check.)_
 >
-> **Implementation status:** Phases 0–4 code-complete and merged to `main`. The full pipeline (Node 1 → Feasibility → Node 2 → Node 3 + refinement) is built; Nodes 1–3 are wired into a LangGraph `StateGraph`, and the refinement loop runs as Phase 5 of the CLI harness (`run_pipeline.py`). Postgres (Session Pooler) and Neo4j (Enterprise edition, local Docker, seeded) are both live; all three compatibility families are enforced as hard filters; PSU wattage is enforced as a fourth hard floor shared between the feasibility gate and Node 3; the feasibility verdict is deterministic and catalog-grounded; GPU/CPU fitness edges carry real benchmark-derived tier/score. Test suite: **46 passed, 0 skipped** (live DBs). Remaining pre-production blockers: Neo4j migration off local Docker, and the absence of any automated end-to-end test — see §9.
+> **Implementation status:** Phases 0–4 code-complete and merged to `main`. The full pipeline (Node 1 → Feasibility → Node 2 → Node 3 + refinement) is built; Nodes 1–3 are wired into a LangGraph `StateGraph`, and the refinement loop runs as Phase 5 of the CLI harness (`run_pipeline.py`) — now in two selectable forms, the default v1 (`RefinementOps`) and an additive v2 intent-based system (`KARMA_REFINEMENT_MODE=intent`), see §2.4. Postgres (Session Pooler) and Neo4j (Enterprise edition, local Docker, seeded) are both live; all three compatibility families are enforced as hard filters; PSU wattage is enforced as a fourth hard floor shared between the feasibility gate and Node 3; the feasibility verdict is deterministic and catalog-grounded; GPU/CPU fitness edges carry real benchmark-derived tier/score. Test suite: **46 passed, 0 skipped** (live DBs, default `pytest tests/` run) — a separate opt-in `tests/e2e/` suite (`pytest -m e2e`) now also exercises real, un-mocked intake → feasibility → allocation → selection → refinement flows, closing the previously-open end-to-end gap (§9). Remaining pre-production blocker: Neo4j migration off local Docker — see §9.
 
 ---
 
@@ -47,12 +47,12 @@ flowchart TD
 - **Output:** Canonical **User Build Brief** JSON (full schema in **Appendix A**).
 - **Not responsible for** feasibility or contradiction checking — Node One has no tier/benchmark data; its only jobs are asking questions and forming valid JSON. The Feasibility Check is the arbiter of buildability at budget.
 
-**As-built deviations from the locked spec:**
-- **Ask-if-ambiguous clarifications are not implemented.** The design carved out targeted clarifications (e.g. "video editing" → "which software?") as the sole exception to the static sequence; no mechanism for them exists — the sequence is strictly linear. Tracked in §9.
-- **Dead spec surface:** `open_questions` (Appendix A: "drives follow-ups") is never populated by any code; `existing.existing_pc_build_id` is defined but consumed by nothing; the `inferred` and `skipped_by_user` source-flag values are never set programmatically (only `user_stated` via LLM instruction and `default_applied` as the initial sentinel occur). (`_QuestionDef.is_final` was the same kind of dead field — removed; exhaustion is signaled by `next_question` returning `None`, per line 45 above.)
-- **Exit-regex looseness:** `\b(done|stop)\b` matches anywhere in an answer ("I'm done gaming by 10pm" triggers early exit if the floor is met).
-- **Graph-mode edge case:** LangGraph `node_intake` is one-turn-only by design; if driven with an unlocked Brief whose questions are exhausted, `_route_after_intake` routes back to `node_intake` indefinitely (routing keys off `brief.status`, which nothing on that path locks). Unexercised in practice — every real graph entry (`run_from_brief`) supplies a locked Brief.
-- **Test coverage: none.** No test imports `node1_intake`; all fixtures are pre-built locked Briefs. Real intake has only ever been exercised manually. See §9.
+**As-built — deviations from the original locked spec, now resolved:**
+- **Ask-if-ambiguous clarifications are implemented.** `extract_turn`'s `clarification_needed` field (LLM-set per the `_EXTRACT_SYSTEM` clarification rule) drives an open-question state machine (`node1_intake.py` ~L210–315): a raised ambiguity is appended to `brief.open_questions` and takes priority over `QUESTION_SEQUENCE` until resolved. After one plain re-ask, an unresolved ambiguity gets a confirm-to-default prompt; a "no" grants one further open-ended attempt, after which it force-resolves to the section's default with `source: skipped_by_user`. Bounded to at most 3 asks per ambiguity — never loops.
+- **Dead spec surface — mostly closed:** `open_questions` is now populated and drained by the mechanism above; `inferred` is now set programmatically (`_apply_heuristic_inferences` derives `performance` from an owned monitor's specs when the user never answered the performance question directly); `skipped_by_user` is now set (force-resolve, above). `existing.existing_pc_build_id` remains defined but consumed by nothing (unchanged — a Node Three / reused-parts gap, not a Node One one; see §2.2 open items).
+- **Exit-regex fixed:** anchored to `^(done|stop)$` (the whole trimmed answer, case-insensitive) — no longer matches "done"/"stop" appearing anywhere inside a longer answer.
+- **Graph-mode edge case fixed:** `node_intake` now owns the termination decision itself — when the question sequence is exhausted it checks `floor_met()` and routes to a new terminal `node_cannot_proceed` node if unmet, instead of looping back to itself; `_route_after_intake` just relays `state["current_node"]` rather than re-deriving from `brief.status`. Regression-covered by `test_graph_intake_termination.py`.
+- **Test coverage added:** `test_node1_intake.py`, `test_node1_intake_core.py`, and `test_graph_intake_termination.py` now exercise `node1_intake` directly — question sequencing, the floor gate, the open-question state machine, exit-regex anchoring, and the graph-loop fix.
 
 ### 2.2 Feasibility Check 🔒 🛠️ _(rewritten to match the as-built deterministic verdict; the original LLM-estimate design survives only as the Postgres-down fallback)_
 
@@ -104,7 +104,7 @@ flowchart TD
 **Three inputs:**
 1. **Default allocation profile** — per-use-case skew predetermined by Karma Computers (gaming → GPU, editing → VRAM + storage, ML → RAM + GPU VRAM, programming → CPU + RAM). As built: `_ALLOCATION_PROFILES` STUB tables, including an ML sub-profile keyed off `sub_case`.
 2. **User brief** from Node One.
-3. **Software minimum specs** — designed as runtime web search from authoritative sources (Steam, Epic Games, official vendor pages); **as built, a clearly-marked hardcoded STUB dict** (`_SOFTWARE_SPECS`). Web-search retrieval was never built (§10).
+3. **Software minimum specs** — designed as runtime web search from authoritative sources (Steam, Epic Games, official vendor pages); **as built, no longer a hardcoded stub** — `agents/software_specs.py`, a Postgres-cached (`software_specs_cache` table) lookup backed by an LLM estimate (temperature=0) on a cache miss, falling back to a category-level stub only on outright failure. Shared with the Feasibility Check's `resolver.py` so the two can never disagree on a title's floor; Node Three's refinement re-solve (`allocate_budget` / `estimate_feasibility`, called from `node3_refinement.py`) reads the same shared lookup. True runtime web-search retrieval (Steam/Epic/vendor pages) was never built (§10).
 
 > **Boundary (amended):** the original locked boundary — *"catalog price floors are not a Node Two input"* — was deliberately relaxed. A deterministic post-step, `_repair_bands_to_catalog`, pins each band to the corresponding min-viable-build part price from the shared catalog floor (`catalog_floor.py`), so Node Three's hard floor filter can never face a band that excludes every floor-meeting part. Allocation *reasoning* (the LLM weight skew) still never sees catalog prices; only the deterministic post-step does.
 
@@ -150,7 +150,13 @@ flowchart LR
   - **Dispatch precedence**, fixed per turn: `restart_trigger → brief_edit → budget_change → pin/reject → re-solve → accept`. `restart_trigger` patches the brief and calls `graph_runner.run_from_brief`, skipping every other op that turn; `locked_parts` and `rejected_parts` persist across it. `brief_edit` patches the brief and re-runs `estimate_feasibility` only (not full Node One) — an `impossible` verdict skips the re-solve. `budget_change` rescales `comfortable_min/max` proportionally, sets the new ceiling, and re-runs `allocate_budget`. `pin` records `locked_parts[slot] = product_id`; `reject` (`apply_reject`) appends a `RejectedPart` and unpins that slot if it was pinned. Any of the above triggers one incumbent-biased re-solve (`_select_build_with_pins` + `diff_and_bias`); `accept` (only reachable if nothing else fired) ships `build_card.product_ids`.
   - **`diff_and_bias`** reconciles a fresh re-solve against the prior card: for each non-pinned slot whose pick changed, it keeps the OLD part if still valid (in the widened price band, not rejected — via the shared `catalog_floor.rejected_product_ids`, not a locally duplicated set — compatible with parts decided so far) — otherwise the new pick wins. Only genuine changes land in `BuildCard.changed_slots` (`{slot, old_product_id, new_product_id, reason}`), so the harness prints a diff instead of a full card each round.
   - `MAX_REFINEMENT_ROUNDS = 5`.
-  - **Test coverage boundary:** the pure-function layer (routing table, dispatch precedence, pin/reject round-trips, all four `diff_and_bias` cases, merge-preservation) is well tested offline (27 tests, LLM/DB/solve monkeypatched). `run_refinement` itself — the input loop, `ThresholdCache` threading across rounds, diff-vs-full-card display, MAX_ROUNDS — has no automated coverage, and no test exercises an un-mocked re-solve (§9).
+  - **Test coverage:** the pure-function layer (routing table, dispatch precedence, pin/reject round-trips, all four `diff_and_bias` cases, merge-preservation) is well tested offline (27 tests, LLM/DB/solve monkeypatched, `test_node3_refinement.py`). `run_refinement`'s harness loop itself — the input loop, `ThresholdCache` threading across rounds, diff-vs-full-card display, MAX_ROUNDS — is now covered by `test_run_refinement_loop.py` (control flow, mocked at the parse/dispatch boundary), and an un-mocked re-solve is now exercised end-to-end by `tests/e2e/test_e2e_refinement.py` and `tests/e2e/test_refinement_rounds.py` (§9).
+
+- **v2 — intent-based refinement (`KARMA_REFINEMENT_MODE=intent`, additive; v1 remains the default):** `parse_refinement_request_v2` / `dispatch_refinement_v2` (`node3_refinement.py`) replace v1's one-op-per-kind `RefinementOps` with a `RefinementPlan` — an arbitrary-length, arbitrary-mix list of typed intents (`set_preference`, `edit_field`, `structural`, `budget`, `pin`, `reject`, `accept`) parsed from a single freeform turn (e.g. "bump budget to 90k and give me an amd card" → one `budget` intent + one `set_preference` intent, where v1 could only ever populate one op per kind). The LLM sees the full build card and the full brief as JSON (`brief.model_dump(mode="json")`, not v1's hand-picked summary strings) plus, when supplied, recent-turn history for continuity across rounds.
+  - **`set_preference`** records a *durable* ecosystem brand preference (`existing.ecosystem_prefs.{gpu,cpu}_brand_pref`) distinct from a one-time `reject` — the prompt instructs the LLM to use it whenever the user expresses a standing brand preference rather than a complaint about one specific part. If the current pick for that slot mismatches the new preference (`_brand_mismatch` — brand read from the catalog `brand` column for non-GPU slots, inferred from the product name via the shared `catalog_floor._gpu_vendor` heuristic for GPU), that part is rejected and unpinned before the re-solve.
+  - **Node 3 applies the durable preference as a soft, fail-open reorder — never a hard filter** (`_brand_ranked_candidates` in `node3_selector.py`, mirroring the existing `_ddr4_first` reorder): candidates matching `ecosystem_prefs.{gpu,cpu}_brand_pref` are stably reordered to the front of the shortlist. Scoped to gpu/cpu only (the two slots `EcosystemPrefs` models). If zero in-band/in-catalog candidates match the preferred brand, the reorder is skipped entirely (fail-open) rather than burying the shortlist behind a bias that helps no one.
+  - Dispatch precedence mirrors v1: structural (patches + restarts via `run_from_brief`, skipping the rest of the turn) → additive edits incl. `set_preference` (feasibility recheck; an `impossible` verdict skips the re-solve) → budget → pin → reject → one incumbent-biased re-solve (`_select_build_with_pins` + `diff_and_bias`) → accept. Reuses the same pure helpers as v1 (`patch_brief_field`, `rescale_budget`, `apply_reject`, `_select_build_with_pins`, `diff_and_bias`), plus a v2-only `patch_brief_field_v2` for the `ecosystem_prefs.*` dotted paths that sit outside v1's field table.
+  - **Test coverage:** offline unit tests in `test_node3_refinement_v2.py` (LLM/DB monkeypatched); the brand-preference re-solve is proven un-mocked, end-to-end, by `tests/e2e/test_e2e_refinement.py`.
 
 ---
 
@@ -176,7 +182,7 @@ flowchart LR
 
 **Fitness coverage (as seeded):** `GOOD_FOR` edges exist for **GPU (42 edges: 14 parts × gaming / content_creation / general_use — work_productivity deliberately absent) and CPU (48 edges: 12 parts × 4 use-cases)**, all carrying benchmark `tier` + `score`. The other seven categories (RAM, storage, motherboard, PSU, case, cooler, fans) have **zero fitness edges by design** — earlier hand-picked stub weights for RAM/STORAGE were removed because fake signal is worse than none; `is_real_ranking` keeps those slots' LLM prompts silent about fitness. The GPU/CPU edges still also carry the legacy stub `weight` property (`seed_graph._GOOD_FOR_WEIGHTS` writes it; nothing reads it — inert).
 
-**Still open:** extending real fitness beyond GPU/CPU (or formally deciding not to); `derive_fitness_thresholds` still spends a `gpt-4o` call producing thresholds for all nine slots when only two are usable. Neo4j runs local Docker only — not yet migrated to a hosted instance reachable by a deployed backend (see §9).
+**Still open:** extending real fitness beyond GPU/CPU (or formally deciding not to). `derive_fitness_thresholds` is now scoped to gpu/cpu only (the two slots with any `GOOD_FOR` edges), so the call no longer produces unusable thresholds for the other seven slots — see §8.1, `test_fitness_threshold_scope.py`. Neo4j runs local Docker only — not yet migrated to a hosted instance reachable by a deployed backend (see §9).
 
 ---
 
@@ -207,7 +213,7 @@ flowchart LR
 |---|---|
 | Conversation-first intake over guided wizard | Build-requirement space is combinatorial (can't enumerate branches); conversation is the agentic thesis; reversible since both modes emit the identical Brief, so a wizard can be added later as additive UI. |
 | Structured questions, freeform paragraph answers | Keeps conversational feel while bounding each turn's scope — easier extraction, cleaner state, lower token use than reverse-engineering one long dump. |
-| Static (non-branching) question set | Answers drive downstream nodes, not which questions are asked; avoids the wizard's hand-authored branch explosion. (Ask-if-ambiguous clarifications were the designed exception; not yet built.) |
+| Static (non-branching) question set | Answers drive downstream nodes, not which questions are asked; avoids the wizard's hand-authored branch explosion. (Ask-if-ambiguous clarifications were the designed exception; now implemented as an open-question state machine — see §2.1.) |
 | Budget + primary use case as the proceed floor | With those two a build estimate is possible; they're the gate to proceed. Everything else is the rest of one fixed pre-prepared set, asked in full unless the user says "done" / "stop" (no arbitrary question cap). |
 | Hard constraints captured via a final open-ended question + pinned block | Non-negotiables (no-RGB, SFF, brand bans) live in structured pinned state separate from the prose summary, so they survive compaction and are never re-suggested. |
 | Node One does no feasibility/contradiction check | It has no tier/benchmark data; its only jobs are asking and forming valid JSON. Feasibility Check is the arbiter. |
@@ -243,7 +249,7 @@ Node 1 does **not** own the conversation loop. The CLI harness (`run_pipeline.py
 - `extract_turn(answer, brief, history)` — runs LLM extraction for one turn and returns the updated Brief.
 - `newly_filled_sections(old_brief, new_brief)` — diff helper for reporting what changed.
 
-This keeps Node 1 stateless and independently testable — though note that no automated test currently exercises it (§9).
+This keeps Node 1 stateless and independently testable — now exercised by `test_node1_intake.py`, `test_node1_intake_core.py`, and `test_graph_intake_termination.py` (§9).
 
 ### 7.3 LLM Arithmetic Constraint — Locked Decision 🔒
 
@@ -281,7 +287,7 @@ DESIGN.md defines the proceed floor as *budget + primary_use_case*. The implemen
 
 `agents/nodes/node3_selector.py` implements the three-step funnel:
 
-- `derive_fitness_thresholds(brief)` — **one** upfront `call_structured` call returning a per-slot threshold dict (stored in build state as `ThresholdCache`, never re-derived per slot). This call uses a **stronger model** (`gpt-4o` via `KARMA_THRESHOLD_MODEL`, `temperature=0`) because the per-slot reasoning quality drives every downstream pick; the per-slot final pick stays on `gpt-4o-mini`. Determinism levers not yet pulled: no `seed=`, no `system_fingerprint` logging (§9).
+- `derive_fitness_thresholds(brief)` — **one** upfront `call_structured` call returning a threshold dict scoped to **gpu/cpu only** — the two slots with any `GOOD_FOR` fitness edges in the graph (42 gpu / 48 cpu, §8.4) — stored in build state as `ThresholdCache`, never re-derived per slot. Regression-covered by `test_fitness_threshold_scope.py`. This call uses a **stronger model** (`gpt-4o` via `KARMA_THRESHOLD_MODEL`, `temperature=0`) because the per-slot reasoning quality drives every downstream pick; the per-slot final pick stays on `gpt-4o-mini`. Determinism levers not yet pulled: no `seed=`, no `system_fingerprint` logging (§9).
 - `select_part(...)` — Step 1: Postgres fetch through the `_fetch_floor` choke point (band + in-stock + requirement floor + rejected-parts exclusion + PSU wattage floor on the PSU slot), escalating band → +20% widen → full catalog on empty; Step 2: Neo4j `compatibility_check` (hard) then `fitness_filter` (soft rank; skipped when `neo4j_available` is False); Step 3: `call_structured` final pick from a shortlist capped at 7, falling back to the top-ranked candidate on a hallucinated `product_id`.
 - `select_build(brief, price_bands)` — walks `SELECTION_ORDER` (GPU → CPU → Motherboard → RAM → Storage → PSU → Case → Cooler → Fans), skips `reuse_parts` with `action == "keep"`, tracks running budget, accumulates `locked_specs` (per-slot catalog specs) to compute the PSU wattage floor from locked GPU+CPU TDP, runs the (warn-only) motherboard lookahead probe after GPU+CPU lock, and runs the **blocking** compatibility validator after each lock.
 - **Graceful degradation (verified):** with Neo4j down *and* Postgres unreachable, `select_build` walks all nine slots, never crashes, and returns an empty `BuildCard` (every slot `None`). This is the designed degraded path — the funnel is structurally correct; only live data is missing. Note this failure is **silent, not loud** — check `scripts/test_db_connection.py` first when builds look empty.
@@ -328,12 +334,14 @@ Rule of thumb: tasks requiring **reasoning about tradeoffs across multiple dimen
 
 _Re-verified section by section against source and live DB state; every claim below was directly confirmed on the current `main` HEAD, not carried forward from a prior session summary._
 
-**Completed since the previous revision** (moved out of this list): deterministic feasibility verdict + `basis` provenance field, `_TIGHT_RATIO` buffer calibration, Node 2 catalog band repair, fitness softgate + benchmark tier/score seeding (GPU/CPU), refinement loop wiring into `run_pipeline.py` Phase 5, Neo4j stand-up + seed + three-family enforcement, Supabase Session Pooler migration, **PSU wattage enforcement in Node 3** (shared `required_psu_wattage`/`_PSU_HEADROOM_W` with the feasibility floor, regression-tested), **rejected-parts consistency** (`catalog_floor.rejected_product_ids`/`filter_rejected` now the single shared predicate across `min_viable_build`, Node 3's `_fetch_floor`, and `diff_and_bias`, regression-tested).
+**Completed since the previous revision** (moved out of this list): deterministic feasibility verdict + `basis` provenance field, `_TIGHT_RATIO` buffer calibration, Node 2 catalog band repair, fitness softgate + benchmark tier/score seeding (GPU/CPU), refinement loop wiring into `run_pipeline.py` Phase 5, Neo4j stand-up + seed + three-family enforcement, Supabase Session Pooler migration, **PSU wattage enforcement in Node 3** (shared `required_psu_wattage`/`_PSU_HEADROOM_W` with the feasibility floor, regression-tested), **rejected-parts consistency** (`catalog_floor.rejected_product_ids`/`filter_rejected` now the single shared predicate across `min_viable_build`, Node 3's `_fetch_floor`, and `diff_and_bias`, regression-tested), **Node 1 ask-if-ambiguous clarifications + `open_questions`/`inferred`/`skipped_by_user` wiring + anchored exit-regex + graph-loop fix + first Node 1 test coverage** (§2.1), **Node 2 software-spec stub replaced by `agents/software_specs.py`** (Postgres-cached, LLM-backed, shared with the Feasibility Check — §2.3/§10), **Node 3 fitness-threshold call scoped to gpu/cpu only** (§3, §8.1, `test_fitness_threshold_scope.py`), **first end-to-end test suite** (`tests/e2e/`, §9), **`postgres.py` `load_dotenv()` fix**, **duplicate `get_driver()` removed**, **empty `agents/harness`/`agents/tools` packages removed**, **stale `# TODO` fallback comments removed from `run_pipeline.py`**, and a **new v2 intent-based refinement system** (`KARMA_REFINEMENT_MODE=intent`, durable brand-preference bias — §2.4).
 
 **Correctness gaps (verified in code; not hygiene — each one changes behaviour or crashes):**
-- **(a) No end-to-end test exists.** Nothing automated runs intake → feasibility → allocation → real (un-mocked) selection → ≥1 refinement op → accept in one continuous flow. Node 1 intake has zero test coverage of any kind; no test calls `select_build` or `run_from_brief` un-mocked; `run_refinement`'s harness loop is untested. The closest artifact is a *manual* `python run_pipeline.py --fixture ...` run. This is the single most important gap in the system.
-- **(b) Refinement is unreachable from the API entry point.** `graph_runner.run_from_brief` — the designated future API surface — terminates at the build card; only the CLI harness reaches `dispatch_refinement` (confirmed: `graph_runner.py` has zero references to it). An API layer wrapped around the graph today would ship builds with no pin/reject/re-solve capability.
-- **(c) `agents/db/postgres.py` never calls `load_dotenv()` — a real crash risk in the primary catalog client, not a hygiene nit.** It reads `os.environ["POSTGRES_URL"]` bare, so any entry point that imports it before a dotenv-loading module (a new script, a REPL session, a future API worker) dies with `KeyError: 'POSTGRES_URL'` at pool creation. It currently works only by import-order luck: `neo4j.py` and `llm/client.py` both load `.env` first. Confirmed by direct read: postgres.py is still the only env-reading module in the codebase without `load_dotenv()`.
+- **(a) Refinement is unreachable from the API entry point.** `graph_runner.run_from_brief` — the designated future API surface — terminates at the build card; only the CLI harness reaches `dispatch_refinement`/`dispatch_refinement_v2` (confirmed: `graph_runner.py` has zero references to either). An API layer wrapped around the graph today would ship builds with no pin/reject/set_preference/re-solve capability.
+
+~~(b) No end-to-end test exists~~ ✅ **RESOLVED.** `tests/e2e/test_full_pipeline.py` (intake → locked build → refinement in one continuous flow), `tests/e2e/test_e2e_refinement.py` (un-mocked CPU brand-preference re-solve through the full v2 selection funnel), `tests/e2e/test_refinement_rounds.py` (four live refinement rounds — pin → reject → additive → structural restart — sharing one `ThresholdCache`/`locked_parts`), and `tests/test_run_refinement_loop.py` (the `run_refinement` harness loop's own control flow, mocked at the parse/dispatch boundary) now cover what was previously only exercised manually. All are opt-in via `pytest -m e2e` where they hit live LLM/DB (excluded from the default `pytest tests/` run so CI doesn't burn LLM budget or flake on live-DB/stock state).
+
+~~(c) `agents/db/postgres.py` never calls `load_dotenv()`~~ ✅ **RESOLVED.** `postgres.py:12` now calls `load_dotenv()` at import time, matching `neo4j.py` and `llm/client.py` — no more import-order-dependent `KeyError: 'POSTGRES_URL'`.
 
 **Environment / infra:**
 - **Neo4j hosted migration:** Enterprise local Docker only — not reachable by a deployed backend (e.g. Aura migration). Standing pre-production blocker.
@@ -342,19 +350,19 @@ _Re-verified section by section against source and live DB state; every claim be
 **Small wiring / hygiene (verified still open):**
 - Swap `run_pipeline.py`'s inline `_print_price_bands` for `formatter.format_price_bands` — confirmed still inline (`_print_price_bands` defined and called at both call sites; `format_price_bands` not imported).
 - Surface `FeasibilityVerdict.basis` in the CLI verdict printout — confirmed `_print_verdict` still prints only verdict/reason/binding_constraint/suggested_adjustments, never `basis`, despite the field always being populated.
-- Remove the five stale `# TODO: Remove when X merges` fallback stub comments in `run_pipeline.py` (lines ~128, 143, 156, 173, 190) — confirmed still present; every referenced module merged long ago.
-- Deduplicate `get_driver()` in `agents/db/neo4j.py` (defined twice, verbatim).
-- Delete or implement the empty `agents/harness/` and `agents/tools/` packages (bare `__init__.py`, referenced nowhere) — confirmed still empty.
-- Node 1 dead spec surface: never-populated `open_questions`; never-set `inferred`/`skipped_by_user` source flags; exit-regex over-matching (`\b(done|stop)\b` anywhere in an answer); graph-mode `node_intake` routing loop on an unlocked, question-exhausted brief. (`_QuestionDef.is_final` removed — no longer applicable.)
+- ~~Remove the five stale `# TODO: Remove when X merges` fallback stub comments in `run_pipeline.py`~~ ✅ **RESOLVED** — confirmed no `TODO` comments remain in `run_pipeline.py`.
+- ~~Deduplicate `get_driver()` in `agents/db/neo4j.py`~~ ✅ **RESOLVED** — confirmed defined once.
+- ~~Delete or implement the empty `agents/harness/` and `agents/tools/` packages~~ ✅ **RESOLVED** — confirmed both directories no longer exist in `agents/`.
+- Node 1 dead spec surface — mostly resolved (see §2.1): `open_questions` is now populated/drained by the ask-if-ambiguous state machine, `inferred`/`skipped_by_user` are now set, the exit-regex is anchored, and the graph-mode routing loop is fixed via the new `node_cannot_proceed` terminal node. Only `existing.existing_pc_build_id` (defined, consumed by nothing) remains open — tracked under the Feasibility Check's reused-parts gap, §2.2.
 
 **Still genuinely open (design questions):**
-- **Fitness beyond GPU/CPU (❓):** extend benchmark tier/score to more categories, or formally scope fitness to the two performance anchors? Until decided, `derive_fitness_thresholds` spends a `gpt-4o` call on nine slots of which seven are unusable; the legacy `weight` property seeded by `seed_graph.py` is inert and should be dropped from the seeder when this is settled.
-- **Ask-if-ambiguous clarifications (§2.1):** the one designed exception to the static question sequence; no mechanism exists.
+- **Fitness beyond GPU/CPU (❓):** extend benchmark tier/score to more categories, or formally scope fitness to the two performance anchors permanently? `derive_fitness_thresholds` is now scoped to gpu/cpu only (✅ resolved — see §3, §8.1), so this is purely a coverage-scope design question now, not a wasted-call problem; the legacy `weight` property seeded by `seed_graph.py` is inert and should be dropped from the seeder when this is settled.
+- ~~Ask-if-ambiguous clarifications (§2.1)~~ ✅ **RESOLVED** — implemented as the open-question state machine described in §2.1 (`node1_intake.py` ~L210–315).
 - ~~Node 3 lookahead~~ ✅ **RESOLVED**: warn-only accepted as sufficient. The originally designed preventive/blocking probes (plural) were considered and deliberately not built. The SELECTION_ORDER fix (Motherboard now locks immediately after CPU, before RAM) already substantially reduces the dead-end scenario the probe existed to catch, leaving only rarer residual cases (e.g. a CPU socket with near-zero in-stock compatible boards) — for those, a best-effort diagnostic warning is judged sufficient; real preventive lookahead/backtracking was weighed against its cost/complexity relative to this now-rare benefit and rejected.
 - **Business-intelligence ranking layer (§5):** hidden margin/overstock weighting injected into Node 3's final-pick prompt; admin-configurable weights. Designed, not built.
 - **Feasibility remaining open items:** non-component cost estimates (rough STUB values in `costs.py`); reused-parts compatibility (PC-of-record via `existing.existing_pc_build_id` consumed by nothing; reused-part constraints not applied inside `min_viable_build`). `_TIER_MIN_CORES` in `catalog_floor.py` is a stub proxy for CPU tier.
 - **Threshold determinism, last lever:** `seed=` + `system_fingerprint` logging on the `gpt-4o` threshold call (temperature=0 alone does not guarantee reproducibility across backend fleets).
-- **Software-spec retrieval:** runtime web search (Steam/Epic/vendor pages) vs the current `_SOFTWARE_SPECS` stub dict.
+- **Software-spec retrieval:** runtime web search (Steam/Epic/vendor pages) vs the current `agents/software_specs.py` Postgres-cache + LLM-estimate lookup (✅ no longer a hardcoded stub, §2.3/§10 — but still not real web search against authoritative sources).
 - **Context window management strategy:** flagged as its own dedicated session topic.
 
 ---
@@ -373,7 +381,7 @@ _Re-verified section by section against source and live DB state; every claim be
 | Session / short-term memory | Redis | not yet wired |
 | Product search | Meilisearch | not yet wired |
 | ERP integration | Tally ERP via XML/ODBC | not yet wired |
-| Software specs retrieval | Runtime web search (Steam, Epic, vendor pages) | currently a clearly-marked STUB dict in Node 2 |
+| Software specs retrieval | Runtime web search (Steam, Epic, vendor pages) | `agents/software_specs.py` — Postgres-cached, LLM-backed lookup shared by Node 2 and the Feasibility Check; no longer a hardcoded stub, but not yet real web search |
 | Testing | — | **pytest**: 46 tests (feasibility/allocation integration, `_fetch_floor` regressions, graph cache round-trip, offline refinement unit suite, PSU wattage, rejected-parts consistency); no end-to-end test (§9) |
 
 ---
@@ -524,14 +532,21 @@ karma ai/
 │   │                               #   feasibility (incl. basis), price_bands, build_card
 │   ├── costs.py                    # shared fixed-cost STUB tables + core_pools() — single source
 │   │                               #   for Node 2 + feasibility
+│   ├── software_specs.py           # get_software_requirements — Postgres-cached + LLM-backed,
+│   │                               #   shared by node2_allocation.py + feasibility/resolver.py
+│   │                               #   (replaces the old node2 _SOFTWARE_SPECS stub, §2.3/§10)
 │   ├── nodes/
-│   │   ├── node1_intake.py         # blank_brief, floor_met, next_question, extract_turn, ...
+│   │   ├── node1_intake.py         # blank_brief, floor_met, next_question, extract_turn,
+│   │   │                           #   ask-if-ambiguous open-question state machine, drive_intake
 │   │   ├── node2_allocation.py     # allocate_budget; _distribute / _compute_bands (largest-remainder);
 │   │   │                           #   _repair_bands_to_catalog
-│   │   ├── node3_selector.py       # derive_fitness_thresholds, select_part, select_build, _fetch_floor,
-│   │   │                           #   SELECTION_ORDER, ThresholdCache, PSU wattage wiring (locked_specs)
-│   │   └── node3_refinement.py     # RefinementOps, route_field_edit, dispatch_refinement, apply_reject,
-│   │                               #   diff_and_bias (pure; loop lives in run_pipeline.py)
+│   │   ├── node3_selector.py       # derive_fitness_thresholds (gpu/cpu only), select_part, select_build,
+│   │   │                           #   _fetch_floor, SELECTION_ORDER, ThresholdCache, PSU wattage wiring
+│   │   │                           #   (locked_specs), _brand_ranked_candidates (v2 brand-bias reorder)
+│   │   └── node3_refinement.py     # v1: RefinementOps, route_field_edit, dispatch_refinement, apply_reject,
+│   │                               #   diff_and_bias; v2 (KARMA_REFINEMENT_MODE=intent, additive):
+│   │                               #   RefinementPlan, parse_refinement_request_v2, dispatch_refinement_v2,
+│   │                               #   SetPreferenceIntent (pure; loop lives in run_pipeline.py)
 │   ├── feasibility/
 │   │   ├── resolver.py             # resolve_requirements + aggregate_scope (deterministic; STUB floor tables)
 │   │   ├── estimate.py             # estimate_feasibility — deterministic verdict primary,
@@ -542,12 +557,10 @@ karma ai/
 │   │                               #   Node 3 floor filter, and diff_and_bias's incumbent-bias check
 │   ├── db/
 │   │   ├── postgres.py             # PostgresClient, get_min_catalog_price, get_parts_in_band
-│   │   │                           #   (NOTE: no load_dotenv — §9 correctness gap c)
+│   │   │                           #   (load_dotenv() at import — §9 correctness gap fixed)
 │   │   ├── neo4j.py                # ping, compatibility_check, fitness_filter → FitnessRanking,
-│   │   │                           #   get_component_fitness
+│   │   │                           #   get_component_fitness, get_driver (deduplicated — §9)
 │   │   └── neo4j_schema.py         # constraints + indexes + apply_schema (Enterprise required)
-│   ├── harness/                    # EMPTY package (bare __init__.py) — §9
-│   ├── tools/                      # EMPTY package (bare __init__.py) — §9
 │   └── output/formatter.py         # format_build_card (wired) / price_bands (swap pending) /
 │                                   #   impossible / tight_warning
 ├── data/
@@ -566,7 +579,17 @@ karma ai/
 └── tests/                          # conftest.py (db_available) + test_pipeline_integration.py (10)
                                     #   + test_node3_selector.py (2) + test_graph_node_select.py (1)
                                     #   + test_node3_refinement.py (27) + test_psu_wattage.py (3)
-                                    #   + test_rejected_parts_consistency.py (2) — 46 total; no E2E (§9)
+                                    #   + test_rejected_parts_consistency.py (2) — 46 total (default
+                                    #   `pytest tests/` run; carried forward from 2026-07-07, §1 banner).
+                                    #   Also present, not in that count: test_node1_intake.py,
+                                    #   test_node1_intake_core.py, test_graph_intake_termination.py,
+                                    #   test_fitness_threshold_scope.py, test_software_specs.py,
+                                    #   test_node3_refinement_v2.py, test_run_refinement_loop.py,
+                                    #   test_selection_order.py, test_costs.py,
+                                    #   test_refinement_threshold_cache.py (offline unit suites), plus
+                                    #   e2e/ (test_full_pipeline.py, test_e2e_refinement.py,
+                                    #   test_refinement_rounds.py — opt-in via `pytest -m e2e`, §9) and
+                                    #   manual/ (smoke_api_readiness.py)
 ```
 
 **Git workflow:** feature branches `phase{N}/feature-name`, conventional commits, PRs merged to `main`. Always stage with specific paths (`git add "karma ai/agents/..."`), never `git add .` — the repo root accumulates Node/`__pycache__`/stray files that `.gitignore` now covers. Always merge with `git merge <branch> -m "..."` to avoid the editor opening.

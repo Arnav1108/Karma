@@ -15,7 +15,7 @@ import csv
 import sys
 from dataclasses import dataclass
 
-from agents.db.neo4j import get_driver
+from agents.db.neo4j import _get_driver
 
 _DEFAULT_GPU_CSV = "data/benchmarks/gpu_benchmarks.csv"
 _DEFAULT_CPU_CSV = "data/benchmarks/cpu_benchmarks.csv"
@@ -210,7 +210,7 @@ def main(gpu_path: str = _DEFAULT_GPU_CSV, cpu_path: str = _DEFAULT_CPU_CSV) -> 
     edges = compute_gpu_edges(gpu_rows) + compute_cpu_edges(cpu_rows)
 
     try:
-        driver = get_driver()
+        driver = _get_driver()
         driver.verify_connectivity()
     except KeyError as e:
         print(

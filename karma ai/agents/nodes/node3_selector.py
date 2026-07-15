@@ -175,7 +175,7 @@ def _fetch_floor(
     locked GPU+CPU draw plus headroom — applied at this SAME choke point, so the
     price-band escalation ladder can never surface an underpowered PSU either.
     """
-    parts = pg.get_parts_in_band(slot, low, high, in_stock=True)
+    parts = pg.get_parts_in_band(slot, low, high)
     parts = filter_rejected(parts, brief)
     parts = _floor_filter(slot, parts, req, brief)
     if slot == ComponentSlot.psu and min_psu_wattage is not None:
@@ -235,7 +235,7 @@ def _ddr4_can_meet_ram_floor(brief: UserBuildBrief) -> bool:
     try:
         req = resolve_requirements(brief)
         kits = PostgresClient().get_parts_in_band(
-            ComponentSlot.ram, 0, _FULL_CATALOG_HIGH, in_stock=True
+            ComponentSlot.ram, 0, _FULL_CATALOG_HIGH
         )
     except Exception:  # noqa: BLE001 — degrade to pre-gate behaviour
         return True
@@ -422,6 +422,27 @@ def derive_fitness_thresholds(brief: UserBuildBrief) -> dict[ComponentSlot, floa
         ComponentSlot.gpu: result.gpu,
         ComponentSlot.cpu: result.cpu,
     }
+
+
+def _resolve_fitness_thresholds(
+    brief: UserBuildBrief, cache: ThresholdCache | None, log_label: str
+) -> dict[ComponentSlot, float]:
+    """Return `cache`'s thresholds if the brief is unchanged, else derive and cache fresh ones.
+
+    Shared by select_build and _select_build_with_pins so a refinement restart
+    reuses the derived thresholds instead of re-deriving them per slot. `cache`
+    may be None — a throwaway ThresholdCache is used internally in that case.
+    """
+    if cache is None:
+        cache = ThresholdCache()
+    current_key = _threshold_key(brief)
+    if cache.thresholds is not None and cache.key == current_key:
+        logger.info("%s reusing cached fitness thresholds (brief unchanged)", log_label)
+        return cache.thresholds
+    fitness_thresholds = derive_fitness_thresholds(brief)
+    cache.thresholds = fitness_thresholds
+    cache.key = current_key
+    return fitness_thresholds
 
 
 # ── Per-slot selection ────────────────────────────────────────────────────────
@@ -756,16 +777,7 @@ def select_build(
             "DISABLED (no in-stock DDR4 kit meets the resolved RAM floor)",
         )
 
-    if cache is None:
-        cache = ThresholdCache()
-    current_key = _threshold_key(brief)
-    if cache.thresholds is not None and cache.key == current_key:
-        fitness_thresholds = cache.thresholds
-        logger.info("[Node3] reusing cached fitness thresholds (brief unchanged)")
-    else:
-        fitness_thresholds = derive_fitness_thresholds(brief)
-        cache.thresholds = fitness_thresholds
-        cache.key = current_key
+    fitness_thresholds = _resolve_fitness_thresholds(brief, cache, "[Node3]")
     logger.info(
         "[Node3] fitness thresholds: %s",
         {s.value: round(t, 2) for s, t in fitness_thresholds.items()},

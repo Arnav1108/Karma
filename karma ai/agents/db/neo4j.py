@@ -64,13 +64,6 @@ RETURN r.tier AS tier, r.score AS score
 LIMIT 1
 """
 
-# Strict fitness lookup — returns nothing if no edge exists.
-_FITNESS_SINGLE_QUERY = """
-MATCH (c:Component {product_id: $product_id})-[r:GOOD_FOR]->(u:UseCase {name: $use_case})
-RETURN r.tier AS tier, r.score AS score
-LIMIT 1
-"""
-
 # Number of quintile buckets score_to_tier() (data/graph/seed_fitness_benchmarks.py)
 # cuts [0.0, 1.0] scores into. required_tier() below must use the same cut points so
 # a threshold of 0.8 means exactly "tier 4 or nothing," not an approximation of it.
@@ -132,11 +125,6 @@ _CONSTRAINT_MAP: dict[tuple, str] = {
     (ComponentSlot.cooler, ComponentSlot.motherboard): _SOCKET_COMPAT_QUERY,
     (ComponentSlot.case, ComponentSlot.motherboard): _FORM_FACTOR_COMPAT_QUERY,
 }
-
-
-def get_driver():
-    """Public accessor for the singleton Neo4j driver."""
-    return _get_driver()
 
 
 def _get_driver():
@@ -327,34 +315,3 @@ class Neo4jClient:
             is_real_ranking=bool(scored),
         )
 
-    def get_component_fitness(
-        self,
-        product_id: str,
-        use_case: str,
-    ) -> Optional[float]:
-        """
-        Return the GOOD_FOR edge score between a component and a use case.
-
-        Returns the continuous score (not the coarse tier) since this is the
-        finer-grained value external callers would want.
-
-        Args:
-            product_id: Component's product ID.
-            use_case: Target use-case name matching UseCase.name in the graph.
-
-        Returns:
-            Edge score as float, or None if no edge exists or component is absent.
-        """
-        try:
-            driver = _get_driver()
-            with driver.session() as session:
-                record = session.run(
-                    _FITNESS_SINGLE_QUERY,
-                    product_id=product_id,
-                    use_case=use_case,
-                ).single()
-                if record is None or record["score"] is None:
-                    return None
-                return float(record["score"])
-        except Exception:
-            return None
