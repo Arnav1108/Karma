@@ -2,26 +2,21 @@
 
 Used by the future API layer and fixture tests to drive the pipeline when
 the intake brief is already known (fixture mode, API calls, integration tests).
-Skips node_intake by pre-loading brief + price_bands into the initial state and
+Skips node_intake by pre-loading the brief into the initial state and
 invoking the graph starting at node_feasibility.
 """
 from __future__ import annotations
 
 from agents.graph import karma_graph
-from agents.schemas import PriceBands, UserBuildBrief
+from agents.schemas import UserBuildBrief
 from agents.state.pipeline_state import PipelineState, new_state
 
 
-def run_from_brief(
-    brief: UserBuildBrief, price_bands: PriceBands | None = None
-) -> PipelineState:
+def run_from_brief(brief: UserBuildBrief) -> PipelineState:
     """Run the pipeline from node_feasibility onward with a pre-built brief.
 
     Args:
         brief: A locked UserBuildBrief (from a fixture, API payload, or intake run).
-        price_bands: Pre-computed PriceBands (optional — node_allocate always
-            recomputes bands from the brief regardless, so this is never read
-            downstream; omit it entirely when the caller has none on hand).
 
     Returns:
         Final PipelineState after the graph reaches END.
@@ -29,7 +24,6 @@ def run_from_brief(
     initial: PipelineState = {
         **new_state(),
         "current_brief": brief,
-        "price_bands": price_bands,
         "current_node": "node_feasibility",
     }
 
