@@ -9,7 +9,7 @@ Idempotent — all writes use MERGE so re-running never duplicates nodes or edge
 import json
 import sys
 
-from agents.db.neo4j import get_driver
+from agents.db.neo4j import _get_driver
 from agents.db.neo4j_schema import apply_schema
 from agents.db.postgres import PostgresClient
 from agents.schemas.slots import ComponentSlot
@@ -275,7 +275,7 @@ def main() -> None:
 
     # ── Neo4j ─────────────────────────────────────────────────────────────────
     try:
-        driver = get_driver()
+        driver = _get_driver()
         driver.verify_connectivity()
     except KeyError as e:
         print(

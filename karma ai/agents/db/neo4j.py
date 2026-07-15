@@ -64,13 +64,6 @@ RETURN r.tier AS tier, r.score AS score
 LIMIT 1
 """
 
-# Strict fitness lookup — returns nothing if no edge exists.
-_FITNESS_SINGLE_QUERY = """
-MATCH (c:Component {product_id: $product_id})-[r:GOOD_FOR]->(u:UseCase {name: $use_case})
-RETURN r.tier AS tier, r.score AS score
-LIMIT 1
-"""
-
 # Number of quintile buckets score_to_tier() (data/graph/seed_fitness_benchmarks.py)
 # cuts [0.0, 1.0] scores into. required_tier() below must use the same cut points so
 # a threshold of 0.8 means exactly "tier 4 or nothing," not an approximation of it.
@@ -132,11 +125,6 @@ _CONSTRAINT_MAP: dict[tuple, str] = {
     (ComponentSlot.cooler, ComponentSlot.motherboard): _SOCKET_COMPAT_QUERY,
     (ComponentSlot.case, ComponentSlot.motherboard): _FORM_FACTOR_COMPAT_QUERY,
 }
-
-
-def get_driver():
-    """Public accessor for the singleton Neo4j driver."""
-    return _get_driver()
 
 
 def _get_driver():
