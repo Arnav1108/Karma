@@ -56,8 +56,9 @@ RETURN candidate_exists, locked_exists, shared_specs > 0 AS compatible
 """
 
 # Fitness edge lookup — OPTIONAL so components with no GOOD_FOR edge return tier/score=null.
-# tier/score are written by data/graph/seed_fitness_benchmarks.py (benchmark-derived),
-# superseding the old stub r.weight from seed_graph.py's _GOOD_FOR_WEIGHTS table.
+# tier/score are written by data/graph/seed_fitness_benchmarks.py (benchmark-derived).
+# seed_graph.py no longer writes r.weight — the _GOOD_FOR_WEIGHTS stub table and its
+# seeding function were removed.
 _FITNESS_QUERY = """
 OPTIONAL MATCH (c:Component {product_id: $product_id})-[r:GOOD_FOR]->(u:UseCase {name: $use_case})
 RETURN r.tier AS tier, r.score AS score
