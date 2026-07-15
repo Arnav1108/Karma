@@ -34,8 +34,7 @@ from ..nodes.node3_selector import (
     _BAND_WIDEN_FACTOR,
     SELECTION_ORDER,
     ThresholdCache,
-    _threshold_key,
-    derive_fitness_thresholds,
+    _resolve_fitness_thresholds,
     select_part,
 )
 from ..schemas.brief import EcosystemPrefs, RejectedPart, UserBuildBrief
@@ -395,16 +394,7 @@ def _select_build_with_pins(
     {slot → BuildCardPart} map. Use `_pinned_parts_from_locked` to build that map
     from a {slot_name → product_id} locked-parts dict.
     """
-    if cache is None:
-        cache = ThresholdCache()
-    current_key = _threshold_key(brief)
-    if cache.thresholds is not None and cache.key == current_key:
-        fitness_thresholds = cache.thresholds
-        logger.info("[Refine] reusing cached fitness thresholds (brief unchanged)")
-    else:
-        fitness_thresholds = derive_fitness_thresholds(brief)
-        cache.thresholds = fitness_thresholds
-        cache.key = current_key
+    fitness_thresholds = _resolve_fitness_thresholds(brief, cache, "[Refine]")
     neo4j_available = Neo4jClient().ping()
     req = resolve_requirements(brief)
     locked_parts: dict[ComponentSlot, str] = {}

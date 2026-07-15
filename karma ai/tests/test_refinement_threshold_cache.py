@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import agents.db.neo4j as neo4j_mod
 import agents.nodes.node3_refinement as refine
+import agents.nodes.node3_selector as selector
 from agents.nodes.node3_refinement import (
     RefinementOps,
     _select_build_with_pins,
@@ -80,7 +81,7 @@ def _counting_derive(monkeypatch):
         count["n"] += 1
         return {ComponentSlot.gpu: 0.5, ComponentSlot.cpu: 0.5}
 
-    monkeypatch.setattr(refine, "derive_fitness_thresholds", derive)
+    monkeypatch.setattr(selector, "derive_fitness_thresholds", derive)
     monkeypatch.setattr(refine, "select_part", _fake_select_part)
     monkeypatch.setattr(neo4j_mod.Neo4jClient, "ping", lambda self: False)
     return count
