@@ -71,7 +71,7 @@ class FitnessThresholds(BaseModel):
     Neo4j fitness_filter threshold applied during slot selection.
 
     Only gpu/cpu are modeled: they are the only two categories with any
-    GOOD_FOR edges in the graph (confirmed via live query — 42 gpu / 48 cpu
+    GOOD_FOR edges in the graph (confirmed via live query — 120 gpu / 124 cpu
     edges, zero for ram/storage/motherboard/psu/case/cooler/fans; see
     docs/context.md open items 4-5). A threshold for a slot with no fitness
     data can never influence fitness_filter's ranking (it always fails open
