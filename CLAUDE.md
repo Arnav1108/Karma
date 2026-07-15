@@ -14,12 +14,15 @@ All source lives under `karma ai/` (note the space — this is the canonical dir
 karma ai/
 ├── run_pipeline.py          # CLI driver; owns the conversation loop
 ├── requirements.txt
+├── DESIGN.md                 # architecture/design reference doc
+├── docs/                     # context.md, lesson.md, plan.md — working notes
 ├── agents/
 │   ├── llm/client.py        # call_structured / call_text / StructuredCallError
 │   ├── graph.py             # LangGraph StateGraph (karma_graph)
 │   ├── graph_runner.py      # run_from_brief(brief, price_bands) — API entry point
 │   ├── state/pipeline_state.py
 │   ├── schemas/             # source_flag, slots (ComponentSlot), brief, feasibility, price_bands, build_card
+│   ├── software_specs.py    # software → hardware requirement spec lookups
 │   ├── nodes/
 │   │   ├── node1_intake.py
 │   │   ├── node2_allocation.py
@@ -36,13 +39,24 @@ karma ai/
 │   │   └── neo4j_schema.py  # constraints, indexes, apply_schema
 │   └── output/formatter.py
 ├── data/
-│   ├── catalog/seed.sql     # Postgres catalog (9 categories, INR prices, specs JSONB)
-│   ├── fixtures/            # budget_gamer / video_editor / ml_workstation + edge_* adversarial fixtures
-│   └── graph/seed_graph.py  # seeds Neo4j from Postgres catalog (idempotent MERGE)
+│   ├── catalog/
+│   │   ├── seed.sql             # Postgres catalog (9 categories, INR prices, specs JSONB)
+│   │   ├── seed_expansion.sql   # catalog expansion beyond the base seed
+│   │   └── software_specs_cache.sql  # cached software → hardware spec lookups
+│   ├── benchmarks/           # cpu_benchmarks.csv, gpu_benchmarks.csv
+│   ├── fixtures/            # budget_gamer / video_editor / ml_workstation / high_end_gamer + edge_* adversarial fixtures
+│   └── graph/
+│       ├── seed_graph.py               # seeds Neo4j from Postgres catalog (idempotent MERGE)
+│       └── seed_fitness_benchmarks.py  # seeds Neo4j fitness benchmark data
 ├── scripts/
 │   ├── test_db_connection.py
-│   └── calibration_sweep.py # rerunnable ground-truth sweep: verdict/allocation/floor calibration vs live catalog stock
-└── tests/                   # conftest.py + test_pipeline_integration.py
+│   ├── calibration_sweep.py       # rerunnable ground-truth sweep: verdict/allocation/floor calibration vs live catalog stock
+│   └── verify_catalog_sync.sql    # checks catalog/graph stay in sync
+└── tests/
+    ├── conftest.py
+    ├── test_*.py              # unit/integration coverage (node1/2/3, costs, selection order, refinement, software specs, etc.)
+    ├── e2e/                   # un-mocked end-to-end pipeline + refinement tests
+    └── manual/                # manual smoke scripts (not run in CI)
 ```
 
 ## Common commands
@@ -95,7 +109,7 @@ Linear flow: `Node 1 (Intake) → Feasibility Check → Node 2 (Budget Allocatio
 - **Node 1** (`node1_intake.py`): Stateless conversational intake. Exposes `blank_brief`, `floor_met`, `next_question`, `extract_turn`, `newly_filled_sections`. The CLI harness (`run_pipeline.py`) owns the loop; Node 1 is one-turn-only in the LangGraph.
 - **Feasibility Check** (`feasibility/estimate.py`): Three-state gate (`comfortable | tight | impossible`). Calls `resolver.py` deterministically, then an LLM with one live Postgres price anchor (cheapest GPU). `impossible` routes to failure surface; other verdicts proceed.
 - **Node 2** (`node2_allocation.py`): LLM emits relative weights; Python converts to INR bands via largest-remainder normalization (`_distribute` / `_compute_bands`). Sums hold by construction.
-- **Node 3** (`node3_selector.py`): Three-step funnel per slot — Postgres catalog query → Neo4j compatibility + fitness filter → LLM final pick. Selection order: GPU → CPU → RAM → Storage → Motherboard → PSU → Case → Cooler → Fans. Fitness thresholds are derived **once upfront** via `gpt-4o`, stored in build state, never re-derived per slot. Degrades gracefully when Neo4j is unavailable (Postgres-only).
+- **Node 3** (`node3_selector.py`): Three-step funnel per slot — Postgres catalog query → Neo4j compatibility + fitness filter → LLM final pick. Selection order: GPU → CPU → Motherboard → RAM → Storage → PSU → Case → Cooler → Fans. Fitness thresholds are derived **once upfront** via `gpt-4o`, stored in build state, never re-derived per slot. Degrades gracefully when Neo4j is unavailable (Postgres-only).
 - **Refinement loop** (`node3_refinement.py`): Actions — `pin | open | swap | accept | restart`. `MAX_REFINEMENT_ROUNDS = 5`.
 - **LangGraph** (`graph.py`): `StateGraph` compiling the above. `graph_runner.run_from_brief` is the ready API entry point.
 
@@ -103,8 +117,9 @@ Linear flow: `Node 1 (Intake) → Feasibility Check → Node 2 (Budget Allocatio
 
 | Call | Model |
 |---|---|
-| Node 1 extraction, feasibility verdict, Node 2 allocation skew, Node 3 final part pick, refinement parse | `gpt-4o-mini` (via `OPENAI_MODEL`) |
+| Node 1 extraction, feasibility verdict, Node 2 allocation skew, Node 3 final part pick, refinement parse (legacy) | `gpt-4o-mini` (via `OPENAI_MODEL`) |
 | **Node 3 fitness thresholds** | **`gpt-4o`** (via `KARMA_THRESHOLD_MODEL`) |
+| Refinement parse — v2 intent-based mode (`KARMA_REFINEMENT_MODE=intent`, `parse_refinement_request_v2`) | `REFINEMENT_MODEL`, via `KARMA_REFINEMENT_MODEL` (defaults to `OPENAI_MODEL`) |
 
 Rule: tasks requiring multi-dimensional tradeoff reasoning without explicit scaffolding use `gpt-4o`; schema-constrained or prompt-scaffolded tasks stay on `gpt-4o-mini`.
 
