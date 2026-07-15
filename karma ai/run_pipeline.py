@@ -35,7 +35,7 @@ from agents.schemas import (  # noqa: E402
 )
 from agents.schemas.build_card import BuildCard  # noqa: E402
 from agents.schemas.price_bands import PriceBand, PriceBands  # noqa: E402
-from agents.output.formatter import format_build_card  # noqa: E402
+from agents.output.formatter import format_build_card, format_price_bands  # noqa: E402
 from agents.state.pipeline_state import PipelineState, new_state  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -234,26 +234,6 @@ def _print_verdict(verdict: FeasibilityVerdict) -> None:
 def _inr(amount: int) -> str:
     return f"INR {amount:,}"
 
-
-def _print_price_bands(bands: PriceBands) -> None:
-    col = (14, 14, 14, 14)
-    header = (
-        f"  {'Component':<{col[0]}}{'Low':>{col[1]}}{'Mid':>{col[2]}}{'High':>{col[3]}}"
-    )
-    rule = "  " + "-" * (sum(col))
-    print(header)
-    print(rule)
-    for slot, band in bands.root.items():
-        name = slot.value.capitalize()
-        print(
-            f"  {name:<{col[0]}}{_inr(band.low):>{col[1]}}"
-            f"{_inr(band.mid):>{col[2]}}{_inr(band.high):>{col[3]}}"
-        )
-    print(rule)
-    print(
-        f"  {'TOTAL':<{col[0]}}{_inr(bands.total_low()):>{col[1]}}"
-        f"{_inr(bands.total_mid()):>{col[2]}}{_inr(bands.total_high()):>{col[3]}}"
-    )
 
 # ---------------------------------------------------------------------------
 # Fixture-all helpers
@@ -499,7 +479,7 @@ def run_allocation(state: PipelineState) -> PipelineState:
         bands = _stub_allocate(brief)
 
     print("\n  Price bands per component (INR):\n")
-    _print_price_bands(bands)
+    print(format_price_bands(bands))
 
     if brief.budget:
         print(f"\n  Budget comfortable_max : {_inr(brief.budget.comfortable_max)}")
@@ -710,7 +690,7 @@ def main() -> None:
                 _print_verdict(verdict)
             if bands:
                 print("\n  Price bands per component (INR):\n")
-                _print_price_bands(bands)
+                print(format_price_bands(bands))
             summary.append((label, verdict, bands))
 
         _print_header("SUMMARY")

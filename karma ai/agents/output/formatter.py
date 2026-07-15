@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from agents.schemas.brief import UserBuildBrief
 from agents.schemas.build_card import BuildCard
-from agents.schemas.feasibility import FeasibilityVerdict
 from agents.schemas.price_bands import PriceBands
 
 _SEP = "=" * 80
@@ -124,31 +123,3 @@ def format_build_card(build_card: BuildCard, brief: UserBuildBrief) -> str:
         _SEP,
     ]
     return "\n".join(lines)
-
-
-def format_impossible(verdict: FeasibilityVerdict) -> str:
-    """Explain why the build is impossible and list suggested adjustments."""
-    lines: list[str] = [
-        _SEP,
-        "  BUILD IMPOSSIBLE",
-        _SEP,
-        "",
-        f"  {verdict.reason}",
-    ]
-    if verdict.binding_constraint:
-        lines += ["", f"  Binding constraint: {verdict.binding_constraint}"]
-    if verdict.suggested_adjustments:
-        lines += ["", "  Suggested adjustments:"]
-        for i, adj in enumerate(verdict.suggested_adjustments, 1):
-            lines.append(f"    {i}. {adj}")
-    lines += ["", _SEP]
-    return "\n".join(lines)
-
-
-def format_tight_warning(verdict: FeasibilityVerdict) -> str:
-    """One-paragraph warning shown before allocation when budget is tight."""
-    parts = ["Warning: your budget is tight for this build.", verdict.reason]
-    if verdict.binding_constraint:
-        parts.append(f"The tightest constraint is: {verdict.binding_constraint}.")
-    parts.append("Proceeding to allocation — expect some compromises on component tiers.")
-    return "  " + " ".join(parts)
