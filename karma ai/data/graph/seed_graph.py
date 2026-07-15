@@ -23,36 +23,6 @@ _USE_CASES = [
     "storage_homeserver",
 ]
 
-# !!! STUB !!! ─────────────────────────────────────────────────────────────────
-# Fitness weights: category → use-case → weight (0.0–1.0).
-# These are placeholder defaults — replace with benchmark-derived values once
-# real performance data is available. PSU / case / cooler / fans are omitted
-# intentionally; they have no meaningful fitness score for a use-case.
-# gpu.work_productivity, gpu.storage_homeserver, and cpu.storage_homeserver are
-# omitted too: a flat non-null stub weight here blocks fitness_filter's
-# null-weight fail-open path, so a low flat number (e.g. gpu 0.4/0.2) silently
-# filters those use-cases down to zero GPU candidates instead of passing
-# everything through unweighted like an un-scored slot would.
-# ram and storage are omitted too: every edge here only ever carried the
-# pre-migration `weight` property (never re-seeded with real tier/score like
-# GPU/CPU were in 1dc9f32), so fitness_filter already fails open for both —
-# these weight-only edges are dead weight that risks reintroducing a hard
-# cutoff if fail-open logic changes later. See docs/context.md open item 5.
-_GOOD_FOR_WEIGHTS: dict[ComponentSlot, dict[str, float]] = {
-    ComponentSlot.gpu: {
-        "gaming":             0.9,
-        "content_creation":   0.7,
-        "general_use":        0.5,
-    },
-    ComponentSlot.cpu: {
-        "gaming":             0.6,
-        "content_creation":   0.7,
-        "work_productivity":  0.9,
-        "general_use":        0.6,
-    },
-}
-# !!! END STUB !!! ─────────────────────────────────────────────────────────────
-
 
 def _parse_specs(raw) -> dict:
     """Return the JSONB specs as a plain dict, dropping None-valued fields."""
@@ -202,27 +172,6 @@ def _seed_compatibility(session, product_id: str, slot: ComponentSlot, specs: di
             )
 
 
-# ── Fitness family edges ──────────────────────────────────────────────────────
-
-def _seed_fitness(session, product_id: str, slot: ComponentSlot) -> None:
-    # !!! STUB !!! weights — see _GOOD_FOR_WEIGHTS table above
-    weights = _GOOD_FOR_WEIGHTS.get(slot)
-    if not weights:
-        return
-    for uc, weight in weights.items():
-        session.run(
-            """
-            MATCH (c:Component {product_id: $product_id})
-            MATCH (u:UseCase {name: $uc})
-            MERGE (c)-[r:GOOD_FOR]->(u)
-            SET r.weight = $weight
-            """,
-            product_id=product_id,
-            uc=uc,
-            weight=weight,
-        )
-
-
 # ── Performance edges ─────────────────────────────────────────────────────────
 
 def _seed_performance(session, product_id: str, slot: ComponentSlot, specs: dict) -> None:
@@ -260,7 +209,6 @@ def seed(session, products: list[dict]) -> None:
         _merge_component(session, row)
         _merge_belongs_to(session, product_id, category)
         _seed_compatibility(session, product_id, slot, specs)
-        _seed_fitness(session, product_id, slot)
         _seed_performance(session, product_id, slot, specs)
 
 

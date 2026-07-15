@@ -1,10 +1,11 @@
 """
 Seed benchmark-derived fitness tier/score edges into the Neo4j knowledge graph.
 
-Sibling to seed_graph.py — does not replace or modify it. seed_graph.py's
-!!! STUB !!! _GOOD_FOR_WEIGHTS table still writes r.weight; this script only
-ever sets r.tier / r.score on the same (:Component)-[:GOOD_FOR]->(:UseCase)
-edge, via MERGE on the relationship (never on the nodes — see upsert_edges).
+Sibling to seed_graph.py — does not replace or modify it. seed_graph.py no
+longer writes r.weight (the _GOOD_FOR_WEIGHTS stub table and its seeding
+function were removed); this script sets r.tier / r.score on the
+(:Component)-[:GOOD_FOR]->(:UseCase) edge, via MERGE on the relationship
+(never on the nodes — see upsert_edges).
 
 Run from karma ai/:
     python -m data.graph.seed_fitness_benchmarks
