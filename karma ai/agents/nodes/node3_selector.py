@@ -175,7 +175,7 @@ def _fetch_floor(
     locked GPU+CPU draw plus headroom — applied at this SAME choke point, so the
     price-band escalation ladder can never surface an underpowered PSU either.
     """
-    parts = pg.get_parts_in_band(slot, low, high, in_stock=True)
+    parts = pg.get_parts_in_band(slot, low, high)
     parts = filter_rejected(parts, brief)
     parts = _floor_filter(slot, parts, req, brief)
     if slot == ComponentSlot.psu and min_psu_wattage is not None:
@@ -235,7 +235,7 @@ def _ddr4_can_meet_ram_floor(brief: UserBuildBrief) -> bool:
     try:
         req = resolve_requirements(brief)
         kits = PostgresClient().get_parts_in_band(
-            ComponentSlot.ram, 0, _FULL_CATALOG_HIGH, in_stock=True
+            ComponentSlot.ram, 0, _FULL_CATALOG_HIGH
         )
     except Exception:  # noqa: BLE001 — degrade to pre-gate behaviour
         return True

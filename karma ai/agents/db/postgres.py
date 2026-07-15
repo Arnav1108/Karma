@@ -88,7 +88,6 @@ class PostgresClient:
         slot: ComponentSlot,
         low: int,
         high: int,
-        in_stock: bool = True,
     ) -> list[dict]:
         with _cursor() as cur:
             cur.execute(
@@ -98,9 +97,9 @@ class PostgresClient:
                 WHERE category = %s
                   AND price_inr >= %s
                   AND price_inr <= %s
-                  AND in_stock = %s
+                  AND in_stock = TRUE
                 """,
-                (slot.value, low, high, in_stock),
+                (slot.value, low, high),
             )
             columns = [desc[0] for desc in cur.description]
             return [dict(zip(columns, row)) for row in cur.fetchall()]
