@@ -108,6 +108,7 @@ def average_catalog_price(slot: ComponentSlot) -> int | None:
     return price
 
 
+# Manual/test cache-refresh utility; not called from any production code path.
 def refresh_catalog_price_cache() -> None:
     """Recompute the average in-stock catalog price for every slot.
 
