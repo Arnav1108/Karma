@@ -313,9 +313,7 @@ def allocate_budget(brief: UserBuildBrief) -> PriceBands:
 
     # Step 2 — core pool
     fixed = _compute_fixed_costs(brief)
-    floor = max(0, brief.budget.comfortable_min - fixed)
-    target = max(floor, brief.budget.comfortable_max - fixed)
-    ceiling = max(target, brief.budget.ceiling - fixed)
+    floor, target, ceiling = _costs.core_pools(brief)
 
     # Step 3 — LLM: produce proportional weights
     default_profile = _get_profile(brief)
