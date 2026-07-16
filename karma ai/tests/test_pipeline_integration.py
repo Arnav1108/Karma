@@ -93,23 +93,31 @@ class TestMlWorkstation:
 
 
 # ── Video Editor ──────────────────────────────────────────────────────────────
-# Fixture: ₹140k–₹160k comfortable, ₹175k ceiling; pc_plus_monitor scope
+# Fixture: ₹100k–₹115k comfortable, ₹130k ceiling; pc_plus_monitor scope
 # Fixed deductions: OEM Windows ₹1500 + 2560×1440 monitor ₹30000 = ₹31500
-# Deterministic pool: target = 160000 - 31500 = 128500
+# Deterministic pool: target = 115000 - 31500 = 83500
 # No reused parts → all 9 slots allocated.
+#
+# Budget deliberately tightened (2026-07-16) after data/catalog/seed_expansion.sql
+# (commit bbc29ab) introduced a much cheaper 16GB-VRAM NVIDIA GPU and 6-core AM4
+# CPU, which dropped the fixture's cheapest-viable-build cost from ~98.75% to
+# ~65.3% of the original ₹128.5k target — flipping the verdict to "comfortable"
+# under the unchanged, correctly-calibrated _TIGHT_RATIO in estimate.py. The
+# budget was re-tuned to the current catalog rather than the threshold, per
+# project policy that thresholds derive from documented rationale, not fixtures.
 
 class TestVideoEditor:
-    """Video editing workstation — ₹140k–₹175k, monitor included in scope."""
+    """Video editing workstation — ₹100k–₹130k, monitor included in scope."""
 
     @pytest.fixture(scope="class")
     def bands(self, video_editor_brief):
         return allocate_budget(video_editor_brief)
 
     def test_fixed_costs(self, bands):
-        # 160000 (comfortable_max) - 1500 (OEM Windows) - 30000 (1440p monitor) = 128500
-        assert abs(bands.total_mid() - 128500) < 500, (
-            f"total_mid={bands.total_mid()}, expected 128500 "
-            "(160000 - 1500 OS - 30000 monitor)"
+        # 115000 (comfortable_max) - 1500 (OEM Windows) - 30000 (1440p monitor) = 83500
+        assert abs(bands.total_mid() - 83500) < 500, (
+            f"total_mid={bands.total_mid()}, expected 83500 "
+            "(115000 - 1500 OS - 30000 monitor)"
         )
 
     def test_all_slots_present(self, bands):
@@ -122,5 +130,5 @@ class TestVideoEditor:
         verdict = estimate_feasibility(video_editor_brief)
         assert verdict.verdict != "comfortable", (
             f"Expected tight or impossible for demanding video editor build "
-            f"(min 16GB VRAM on ₹128.5k core budget), got {verdict.verdict!r}"
+            f"(min 16GB VRAM on ₹83.5k core budget), got {verdict.verdict!r}"
         )

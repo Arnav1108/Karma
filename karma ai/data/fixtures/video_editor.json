@@ -16,9 +16,9 @@
 
   "budget": {
     "currency": "INR",
-    "comfortable_min": 140000,
-    "comfortable_max": 160000,
-    "ceiling": 175000,
+    "comfortable_min": 100000,
+    "comfortable_max": 115000,
+    "ceiling": 130000,
     "scope": "pc_plus_monitor",
     "notes": null
   },

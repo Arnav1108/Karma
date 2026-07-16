@@ -15,8 +15,14 @@ Public API:
     extract_turn(user_answer, current_brief, conversation_history,
                  current_question_id=None, open_question_attempts=None) -> UserBuildBrief
     lock_brief(brief) -> UserBuildBrief
+    IntakeSessionState — JSON-serializable per-conversation state (brief + history
+        + the bookkeeping drive_intake used to hold in loop locals).
+    intake_begin(state, phrase_fn=None) -> (state, IntakeQuestion | None)
+    intake_step(state, user_answer, phrase_fn=None)
+        -> (state, IntakeQuestion | None, locked)
     drive_intake(brief, answer_fn, conversation_history=None, phrase_fn=None)
         -> tuple[UserBuildBrief, list[dict]]
+        (a thin loop over intake_begin/intake_step — the loop logic lives ONLY there)
     IntakeInterrupted — raised by an answer_fn to stop drive_intake early.
 """
 
@@ -26,10 +32,10 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agents.llm import StructuredCallError, call_structured, call_text
 from agents.schemas import (
@@ -800,6 +806,143 @@ def _default_phrase_fn(question_id: str) -> str:
     return call_text(_QUESTIONS_BY_ID[question_id].raw_text, system=_SYSTEM_PROMPT)
 
 
+# ---------------------------------------------------------------------------
+# Resumable per-turn primitives — IntakeSessionState / intake_begin / intake_step
+# ---------------------------------------------------------------------------
+
+class IntakeQuestion(BaseModel):
+    """One question to put to the user, with enough metadata for any caller
+    (CLI harness, API layer) to render and route it."""
+    question_id: str | None   # QUESTION_SEQUENCE field id; None only when a
+                              # pre-existing open question has no known field
+    text: str
+    kind: Literal["sequence", "clarification", "confirm_default"]
+
+
+class IntakeSessionState(BaseModel):
+    """Everything drive_intake used to hold in loop locals, as one fully
+    JSON-serializable object (model_dump(mode="json") / model_validate
+    round-trips losslessly), so a caller can persist it between turns —
+    e.g. an HTTP API session store resuming the conversation per request.
+
+    asked_so_far is a list (not a set) purely for JSON-serializability;
+    membership semantics are unchanged (intake_step deduplicates on append).
+    current_question_id carries the served question's field id across the
+    ask→answer gap (a loop local in the old drive_intake), consumed by
+    intake_step as extract_turn's current_question_id.
+    """
+    brief: UserBuildBrief
+    history: list[dict] = Field(default_factory=list)
+    asked_so_far: list[str] = Field(default_factory=list)
+    open_question_attempts: dict[str, int] = Field(default_factory=dict)
+    pending_open_question_field: str | None = None
+    current_question_id: str | None = None
+
+
+def intake_begin(
+    state: IntakeSessionState,
+    phrase_fn: Callable[[str], str] | None = None,
+) -> tuple[IntakeSessionState, IntakeQuestion | None]:
+    """Serve the next question for this conversation, or None when the sequence
+    is exhausted with no pending open question.
+
+    The question-selection half of the intake turn: open questions take
+    priority (their text is already phrased — never goes through phrase_fn;
+    attempts == 1 serves the confirm-to-default prompt); otherwise
+    next_question_id() picks the next unanswered sequence entry and phrase_fn
+    (default: the real call_text phrasing) phrases it. Serving a question
+    appends it to state.history as the assistant turn and records its field id
+    in state.current_question_id for intake_step to consume.
+
+    Never locks or force-locks the brief — that is drive_intake's CLI-exit
+    semantic, not a per-turn one. Mutates state in place and returns it.
+    """
+    phrase = phrase_fn or _default_phrase_fn
+
+    if state.brief.open_questions:
+        oq = state.brief.open_questions[0]
+        attempts = state.open_question_attempts.get(oq, 0)
+        question_text = next_question(
+            state.brief, set(state.asked_so_far), state.open_question_attempts
+        )
+        q_id = state.pending_open_question_field
+        kind = "confirm_default" if attempts == 1 else "clarification"
+    else:
+        q_id = next_question_id(state.brief, set(state.asked_so_far))
+        if q_id is None:
+            state.current_question_id = None
+            return state, None
+        question_text = phrase(q_id)
+        kind = "sequence"
+
+    state.history.append({"role": "assistant", "content": question_text})
+    state.current_question_id = q_id
+    return state, IntakeQuestion(question_id=q_id, text=question_text, kind=kind)
+
+
+def intake_step(
+    state: IntakeSessionState,
+    user_answer: str,
+    phrase_fn: Callable[[str], str] | None = None,
+) -> tuple[IntakeSessionState, IntakeQuestion | None, bool]:
+    """Process one user answer, then serve the next question.
+
+    The answer-processing half of the intake turn, preserving drive_intake's
+    exact ordering guarantees:
+      1. extract_turn runs while state.history contains the assistant question
+         but NOT this user answer (the answer is passed separately);
+      2. the user answer is appended to history after extraction;
+      3. asked_so_far gains the answered question's id plus any sections the
+         answer opportunistically filled (newly_filled_sections);
+      4. pending_open_question_field is set when a clarification first
+         appears, cleared when none remain, and left alone otherwise.
+
+    state.open_question_attempts is handed to extract_turn as the same dict
+    instance (extract_turn mutates it in place) — a caller persisting state
+    must re-serialize after this returns, not before.
+
+    Returns (state, next_question, locked). locked=True means extract_turn
+    locked the brief this turn ("done"/"stop" + floor_met, or its own lock
+    path) — no next question is computed and no phrasing LLM call is made.
+    (state, None, False) means the question sequence is exhausted without a
+    lock: the caller decides what happens next (drive_intake force-locks; an
+    API caller should check floor_met() and choose). Never force-locks.
+    Mutates state in place and returns it.
+    """
+    q_id = state.current_question_id
+    old_brief = state.brief
+    had_open_question_before = bool(old_brief.open_questions)
+
+    new_brief = extract_turn(
+        user_answer,
+        old_brief,
+        state.history,
+        current_question_id=q_id,
+        open_question_attempts=state.open_question_attempts,
+    )
+    state.history.append({"role": "user", "content": user_answer})
+
+    if q_id and q_id not in state.asked_so_far:
+        state.asked_so_far.append(q_id)
+    for section_id in sorted(newly_filled_sections(old_brief, new_brief)):
+        if section_id not in state.asked_so_far:
+            state.asked_so_far.append(section_id)
+
+    if new_brief.open_questions and not had_open_question_before:
+        state.pending_open_question_field = q_id
+    elif not new_brief.open_questions:
+        state.pending_open_question_field = None
+
+    state.brief = new_brief
+    state.current_question_id = None
+
+    if new_brief.status == "locked":
+        return state, None, True
+
+    state, question = intake_begin(state, phrase_fn)
+    return state, question, False
+
+
 def drive_intake(
     brief: UserBuildBrief,
     answer_fn: Callable[[str, str], str],
@@ -808,86 +951,47 @@ def drive_intake(
 ) -> tuple[UserBuildBrief, list[dict]]:
     """Run the intake question loop to completion, independent of input()/print().
 
-    Owns the asked_so_far / opportunistic-fill bookkeeping, the ask-if-ambiguous
-    open_question_attempts state machine, and conversation-history threading that
-    both the interactive CLI harness (run_pipeline.py) and any non-interactive
-    caller (e.g. an E2E test) need identically — the single place this logic
-    lives, so the two can never drift apart.
+    A thin loop over intake_begin()/intake_step() — the asked_so_far /
+    opportunistic-fill bookkeeping, the ask-if-ambiguous open_question_attempts
+    state machine, and conversation-history threading all live in those
+    primitives, the single place this logic exists, so the interactive CLI
+    harness (run_pipeline.py), non-interactive callers (e.g. an E2E test), and
+    per-turn callers (e.g. an HTTP API) can never drift apart.
 
-    Per turn:
-      0. If brief.open_questions is non-empty, that takes priority over
-         QUESTION_SEQUENCE (see next_question) — question_id is whichever
-         QUESTION_SEQUENCE field the pending clarification concerns
-         (pending_open_question_field), not necessarily the next unasked
-         sequence item. Otherwise next_question_id() picks the next unanswered
-         sequence question (or the loop ends).
-      1. phrase_fn(question_id) -> question text for a fresh sequence question.
-         Defaults to the real call_text phrasing; a caller that wants to skip
-         that LLM call (e.g. a scripted test feeding canned answers keyed by
-         question ID) can pass its own phrase_fn. Open-question / confirm-to-
-         default text is already phrased (next_question handles it) and never
-         goes through phrase_fn.
-      2. answer_fn(question_id, question_text) -> the user's answer. May raise
-         IntakeInterrupted to stop early (caught here, not propagated).
-      3. extract_turn(..., current_question_id=question_id,
-         open_question_attempts=open_question_attempts) merges the answer into
-         the brief — this may lock the brief early via its own "done"/"stop" +
-         floor_met exit path, or advance/force-resolve a pending open question.
+    Per turn: answer_fn(question_id, question_text) -> the user's answer (may
+    raise IntakeInterrupted to stop early — caught here, not propagated), then
+    intake_step() merges the answer and serves the next question. phrase_fn
+    (default: the real call_text phrasing) is threaded down to the primitives;
+    open-question / confirm-to-default text is already phrased and never goes
+    through it.
 
-    Stops when next_question_id() returns None (with no pending open question),
-    extract_turn() locks the brief, or answer_fn raises IntakeInterrupted. On
-    any stop, force-locks the brief via lock_brief() if it isn't already locked
-    (mirrors run_pipeline.py's end-of-sequence behavior).
+    Stops when intake_step() serves no further question (sequence exhausted
+    with no pending open question), locks the brief (its "done"/"stop" +
+    floor_met exit path or a natural lock), or answer_fn raises
+    IntakeInterrupted. On any stop, force-locks the brief via lock_brief() if
+    it isn't already locked (mirrors run_pipeline.py's end-of-sequence
+    behavior). This force-lock is drive_intake's CLI semantic only — the
+    per-turn primitives never force-lock.
 
     Returns (final_brief, conversation_history).
     """
-    history = list(conversation_history or [])
-    asked_so_far: set[str] = set()
-    open_question_attempts: dict[str, int] = {}
-    pending_open_question_field: str | None = None
-    phrase = phrase_fn or _default_phrase_fn
+    state = IntakeSessionState(
+        brief=brief,
+        history=list(conversation_history or []),
+    )
+    state, question = intake_begin(state, phrase_fn)
 
-    while True:
-        if brief.open_questions:
-            question_text = next_question(brief, asked_so_far, open_question_attempts)
-            q_id = pending_open_question_field
-        else:
-            q_id = next_question_id(brief, asked_so_far)
-            if q_id is None:
-                break
-            question_text = phrase(q_id)
-
-        history.append({"role": "assistant", "content": question_text})
-
+    while question is not None:
         try:
-            user_answer = answer_fn(q_id, question_text)
+            user_answer = answer_fn(question.question_id, question.text)
         except IntakeInterrupted:
             break
-
-        old_brief = brief
-        had_open_question_before = bool(old_brief.open_questions)
-        brief = extract_turn(
-            user_answer,
-            brief,
-            history,
-            current_question_id=q_id,
-            open_question_attempts=open_question_attempts,
-        )
-        history.append({"role": "user", "content": user_answer})
-
-        if q_id:
-            asked_so_far.add(q_id)
-        asked_so_far.update(newly_filled_sections(old_brief, brief))
-
-        if brief.open_questions and not had_open_question_before:
-            pending_open_question_field = q_id
-        elif not brief.open_questions:
-            pending_open_question_field = None
-
-        if brief.status == "locked":
+        state, question, locked = intake_step(state, user_answer, phrase_fn)
+        if locked:
             break
 
-    if brief.status != "locked":
-        brief = lock_brief(brief)
+    final_brief = state.brief
+    if final_brief.status != "locked":
+        final_brief = lock_brief(final_brief)
 
-    return brief, history
+    return final_brief, state.history
