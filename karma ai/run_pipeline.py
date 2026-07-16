@@ -7,10 +7,6 @@ Wires four stages end to end:
   PHASE 3  Allocation    -  price bands per component
   PHASE 4  Selection     -  part finder funnel -> build card
 
-Modules may not be merged yet; this harness imports them defensively
-and falls back to clearly-labelled stubs so the pipeline runs skeletally now.
-Stubs drop out automatically once the real modules land.
-
 Usage:
   python run_pipeline.py                                    # full conversational run
   python run_pipeline.py --fixture data/fixtures/budget_gamer.json
@@ -19,7 +15,6 @@ Usage:
 """
 from __future__ import annotations
 
-import datetime
 import os
 import sys
 import uuid
@@ -29,61 +24,30 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from agents.schemas import (  # noqa: E402
-    ComponentSlot,
     FeasibilityVerdict,
     UserBuildBrief,
 )
 from agents.schemas.build_card import BuildCard  # noqa: E402
-from agents.schemas.price_bands import PriceBand, PriceBands  # noqa: E402
+from agents.schemas.price_bands import PriceBands  # noqa: E402
 from agents.output.formatter import format_build_card, format_price_bands  # noqa: E402
 from agents.state.pipeline_state import PipelineState, new_state  # noqa: E402
 
-# ---------------------------------------------------------------------------
-# Defensive imports  -  _HAS_* flags control real vs stub dispatch.
-# Only ImportError is caught: runtime errors inside a module must surface.
-# ---------------------------------------------------------------------------
-
-try:
-    from agents.nodes.node1_intake import (
-        IntakeInterrupted,
-        blank_brief,
-        drive_intake,
-    )
-    _HAS_NODE1 = True
-except ImportError:
-    _HAS_NODE1 = False
-
-try:
-    from agents.feasibility.estimate import estimate_feasibility
-    _HAS_ESTIMATE = True
-except ImportError:
-    _HAS_ESTIMATE = False
-
-try:
-    from agents.nodes.node2_allocation import allocate_budget
-    _HAS_ALLOC = True
-except ImportError:
-    _HAS_ALLOC = False
-
-try:
-    from agents.nodes.node3_selector import select_build
-    _HAS_SELECT = True
-except ImportError:
-    _HAS_SELECT = False
-
-try:
-    from agents.nodes.node3_selector import ThresholdCache
-    from agents.nodes.node3_refinement import (
-        MAX_REFINEMENT_ROUNDS,
-        dispatch_refinement,
-        dispatch_refinement_v2,
-        parse_refinement_request,
-        parse_refinement_request_v2,
-    )
-    from agents.llm.client import StructuredCallError
-    _HAS_REFINE = True
-except ImportError:
-    _HAS_REFINE = False
+from agents.nodes.node1_intake import (  # noqa: E402
+    IntakeInterrupted,
+    blank_brief,
+    drive_intake,
+)
+from agents.feasibility.estimate import estimate_feasibility  # noqa: E402
+from agents.nodes.node2_allocation import allocate_budget  # noqa: E402
+from agents.nodes.node3_selector import ThresholdCache, select_build  # noqa: E402
+from agents.nodes.node3_refinement import (  # noqa: E402
+    MAX_REFINEMENT_ROUNDS,
+    dispatch_refinement,
+    dispatch_refinement_v2,
+    parse_refinement_request,
+    parse_refinement_request_v2,
+)
+from agents.llm.client import StructuredCallError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -97,100 +61,6 @@ _FIXTURE_ALL_PATHS: dict[str, Path] = {
     "ml_workstation": _FIXTURES_DIR / "ml_workstation.json",
 }
 
-_STUB_QUESTIONS = [
-    "What is your total budget in INR for this build, and does it cover just the PC "
-    "or also a monitor and peripherals?",
-    "What will you primarily use this PC for? Name the key software you plan to run "
-    "(e.g. game titles, creative tools, dev environment).",
-    "Any hard constraints  -  brand preferences, form-factor requirements, "
-    "parts you must avoid? (type 'none' to skip)",
-]
-
-# Realistic mid-range INR bands; total_mid ~62,700 (within budget_gamer 65 k max).
-_STUB_BANDS_INR: dict[str, dict[str, int]] = {
-    "gpu":         {"low": 18000, "mid": 22000, "high": 27000},
-    "cpu":         {"low": 10000, "mid": 13000, "high": 16000},
-    "ram":         {"low":  3500, "mid":  4500, "high":  6000},
-    "storage":     {"low":  3000, "mid":  4000, "high":  5500},
-    "motherboard": {"low":  5500, "mid":  7000, "high":  9000},
-    "psu":         {"low":  3500, "mid":  4500, "high":  6000},
-    "case":        {"low":  3000, "mid":  4000, "high":  5500},
-    "cooler":      {"low":  1500, "mid":  2500, "high":  3500},
-    "fans":        {"low":    800, "mid":  1200, "high":  1800},
-}
-
-# ---------------------------------------------------------------------------
-# Stub functions
-# Each stub has the expected real interface documented so wiring is drop-in.
-# ---------------------------------------------------------------------------
-
-def _stub_next_question(brief: UserBuildBrief, asked_so_far: set[str]) -> str | None:
-    # EXPECTED INTERFACE:
-    #   next_question(brief: UserBuildBrief, asked_so_far: set[str]) -> str | None
-    #   Walks the static QUESTION_SEQUENCE, skips IDs in asked_so_far or already
-    #   filled in the brief, calls call_text() to phrase the next question, or
-    #   returns None when all questions are exhausted.
-    asked_count = len(asked_so_far)
-    return _STUB_QUESTIONS[asked_count] if asked_count < len(_STUB_QUESTIONS) else None
-
-
-def _stub_extract_turn(
-    user_answer: str,
-    current_brief: UserBuildBrief,
-    conversation_history: list[dict],
-) -> UserBuildBrief:
-    # EXPECTED INTERFACE:
-    #   extract_turn(user_answer: str, current_brief: UserBuildBrief,
-    #                conversation_history: list[dict]) -> UserBuildBrief
-    #   LLM extracts structured fields from user_answer using conversation_history
-    #   as context, merges into current_brief via _merge_delta, recomputes
-    #   completeness, and returns the updated UserBuildBrief.
-    #   On early-exit signal ("done"/"stop") + floor met: locks the brief immediately.
-    #   On StructuredCallError: returns current_brief unchanged.
-    return current_brief
-
-
-def _stub_estimate_feasibility(brief: UserBuildBrief) -> FeasibilityVerdict:
-    # EXPECTED INTERFACE:
-    #   estimate_feasibility(brief: UserBuildBrief) -> FeasibilityVerdict
-    #   Three steps: resolve_requirements() -> aggregate_scope() -> LLM call
-    #   with one live Postgres price anchor (cheapest binding slot, usually GPU).
-    #   Returns FeasibilityVerdict(verdict in {"comfortable","tight","impossible"}).
-    print("  [STUB] estimate_feasibility not available  -  returning comfortable verdict.")
-    return FeasibilityVerdict(
-        verdict="comfortable",
-        basis="stub",
-        reason="[STUB] Cannot estimate without estimate module  -  real call goes here.",
-        binding_constraint=None,
-        suggested_adjustments=[],
-    )
-
-
-def _stub_allocate(brief: UserBuildBrief) -> PriceBands:
-    # EXPECTED INTERFACE:
-    #   allocate(brief: UserBuildBrief) -> PriceBands
-    #   Reads default allocation profile + brief workload + live software specs,
-    #   returns PriceBands keyed by ComponentSlot where:
-    #     sum(mid values)  == core budget target
-    #     sum(high values) == budget ceiling
-    #     sum(low values)  == budget floor
-    print("  [STUB] allocate not available  -  returning placeholder price bands.")
-    bands = {
-        ComponentSlot(slot): PriceBand(**values)
-        for slot, values in _STUB_BANDS_INR.items()
-    }
-    return PriceBands(root=bands)
-
-
-def _stub_select_build(brief: UserBuildBrief, price_bands: PriceBands) -> BuildCard:
-    # EXPECTED INTERFACE:
-    #   select_build(brief, price_bands, feasibility_verdict=None, cache=None) -> BuildCard
-    #   Three-step funnel per slot (Postgres catalog -> Neo4j graph filter -> LLM
-    #   pick), walked in SELECTION_ORDER. Returns a BuildCard with parts, total
-    #   price, summary, and any dead-end warnings.
-    print("  [STUB] select_build not available  -  returning empty build card.")
-    return BuildCard(parts=[], total_price_inr=0, summary="[STUB] no parts selected", warnings=[])
-
 # ---------------------------------------------------------------------------
 # Display helpers
 # ---------------------------------------------------------------------------
@@ -202,16 +72,6 @@ def _print_header(title: str) -> None:
     print(f"\n{_SEP}")
     print(f"  {title}")
     print(_SEP)
-
-
-def _print_module_status() -> None:
-    def tag(flag: bool) -> str:
-        return "[REAL]" if flag else "[STUB]"
-
-    print(f"\n  node1_intake      {tag(_HAS_NODE1)}")
-    print(f"  estimate          {tag(_HAS_ESTIMATE)}")
-    print(f"  node2_allocation  {tag(_HAS_ALLOC)}")
-    print(f"  node3_selector    {tag(_HAS_SELECT)}")
 
 
 def _load_fixture_brief(path: Path) -> UserBuildBrief:
@@ -244,26 +104,20 @@ def _run_fixture_quiet(
     brief: UserBuildBrief,
 ) -> tuple[FeasibilityVerdict | None, PriceBands | None]:
     """Run feasibility + allocation for one fixture without sys.exit on impossible."""
-    if _HAS_ESTIMATE:
-        try:
-            verdict = estimate_feasibility(brief)
-        except Exception as exc:
-            print(f"  [{label}] estimate_feasibility raised {type(exc).__name__}: {exc}")
-            verdict = _stub_estimate_feasibility(brief)
-    else:
-        verdict = _stub_estimate_feasibility(brief)
+    try:
+        verdict = estimate_feasibility(brief)
+    except Exception as exc:
+        print(f"  [{label}] estimate_feasibility raised {type(exc).__name__}: {exc}")
+        return None, None
 
     if verdict.verdict == "impossible":
         return verdict, None
 
-    if _HAS_ALLOC:
-        try:
-            bands = allocate_budget(brief)
-        except Exception as exc:
-            print(f"  [{label}] allocate raised {type(exc).__name__}: {exc}")
-            bands = _stub_allocate(brief)
-    else:
-        bands = _stub_allocate(brief)
+    try:
+        bands = allocate_budget(brief)
+    except Exception as exc:
+        print(f"  [{label}] allocate raised {type(exc).__name__}: {exc}")
+        return verdict, None
 
     return verdict, bands
 
@@ -320,11 +174,6 @@ def _cli_answer_fn(question_id: str, question_text: str) -> str:
 def run_intake(state: PipelineState) -> PipelineState:
     _print_header("PHASE 1  -  INTAKE")
 
-    if not _HAS_NODE1:
-        print("  [STUB] node1_intake not available  -  loading fixture brief (budget_gamer.json).")
-        state = {**state, "current_brief": _load_fixture_brief(_FIXTURE_ALL_PATHS["budget_gamer"])}
-        return _run_stub_intake_loop(state)
-
     # Initialise a blank brief; IDs are session-scoped placeholders.
     initial_brief = blank_brief(
         brief_id=uuid.uuid4(),
@@ -353,77 +202,6 @@ def run_intake(state: PipelineState) -> PipelineState:
     return state
 
 
-def _run_stub_intake_loop(state: PipelineState) -> PipelineState:
-    """Legacy stub-mode intake loop, used only when node1_intake fails to import.
-
-    Kept as its own inline loop (not routed through drive_intake, which is a
-    real-node1_intake-only driver) since the stub's question/extraction/exit
-    logic is entirely separate stand-in behavior for early scaffolding.
-    """
-    asked_so_far: set[str] = set()
-    turn_count = 0
-
-    while True:
-        brief = state["current_brief"]
-
-        asked_count = len(asked_so_far)
-        question = (
-            _STUB_QUESTIONS[asked_count]
-            if asked_count < len(_STUB_QUESTIONS)
-            else None
-        )
-        current_q_id = f"_stub_{asked_count}"
-
-        if question is None:
-            print("\n  All questions answered  -  locking Brief.")
-            break
-
-        print(f"\n  Karma AI: {question}")
-        try:
-            user_input = input("  You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n  [Interrupted]")
-            break
-
-        if not user_input:
-            print("  (Empty input  -  please answer or type 'done' to finish early.)")
-            continue
-
-        history = list(state.get("conversation_history") or [])
-        history.append({"role": "assistant", "content": question})
-        history.append({"role": "user", "content": user_input})
-        brief = _stub_extract_turn(user_input, brief, history)
-        state = {**state, "current_brief": brief, "conversation_history": history}
-
-        asked_so_far.add(current_q_id)
-
-        # Stub: handle "done"/"stop" manually (extract_turn doesn't do it).
-        if user_input.lower() in ("done", "stop"):
-            if brief.completeness.required_complete:
-                print("  Early exit accepted  -  required fields complete.")
-                break
-            print(
-                "  Budget and primary use case must be filled before stopping. "
-                "Please continue."
-            )
-            continue
-
-        turn_count += 1
-
-    # Lock brief if the question set exhausted naturally.
-    brief = state["current_brief"]
-    if brief.status != "locked":
-        data = brief.model_dump()
-        data["status"] = "locked"
-        data["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        brief = UserBuildBrief.model_validate(data)
-        state = {**state, "current_brief": brief}
-
-    state = {**state, "current_node": "feasibility"}
-    print(f"\n  Brief status: {brief.status}  |  Turns: {turn_count}")
-    return state
-
-
 def run_feasibility(state: PipelineState) -> PipelineState:
     _print_header("PHASE 2  -  FEASIBILITY CHECK")
 
@@ -432,15 +210,11 @@ def run_feasibility(state: PipelineState) -> PipelineState:
         print("  [ERROR] No brief in state  -  intake must run before feasibility.")
         sys.exit(1)
 
-    if _HAS_ESTIMATE:
-        try:
-            verdict = estimate_feasibility(brief)
-        except Exception as exc:
-            print(f"  [WARNING] estimate_feasibility raised {type(exc).__name__}: {exc}")
-            print("  [FALLBACK] Using stub comfortable verdict.")
-            verdict = _stub_estimate_feasibility(brief)
-    else:
-        verdict = _stub_estimate_feasibility(brief)
+    try:
+        verdict = estimate_feasibility(brief)
+    except Exception as exc:
+        print(f"  [ERROR] estimate_feasibility raised {type(exc).__name__}: {exc}")
+        sys.exit(1)
 
     _print_verdict(verdict)
 
@@ -468,15 +242,11 @@ def run_allocation(state: PipelineState) -> PipelineState:
         print("  [ERROR] No brief in state  -  cannot allocate without a brief.")
         sys.exit(1)
 
-    if _HAS_ALLOC:
-        try:
-            bands = allocate_budget(brief)
-        except Exception as exc:
-            print(f"  [WARNING] allocate raised {type(exc).__name__}: {exc}")
-            print("  [FALLBACK] Using stub price bands.")
-            bands = _stub_allocate(brief)
-    else:
-        bands = _stub_allocate(brief)
+    try:
+        bands = allocate_budget(brief)
+    except Exception as exc:
+        print(f"  [ERROR] allocate_budget raised {type(exc).__name__}: {exc}")
+        sys.exit(1)
 
     print("\n  Price bands per component (INR):\n")
     print(format_price_bands(bands))
@@ -501,15 +271,11 @@ def run_selection(state: PipelineState) -> PipelineState:
         print("  [ERROR] No brief/price bands in state  -  cannot select parts.")
         sys.exit(1)
 
-    if _HAS_SELECT:
-        try:
-            build_card = select_build(brief, bands, feasibility_verdict=verdict)
-        except Exception as exc:
-            print(f"  [WARNING] select_build raised {type(exc).__name__}: {exc}")
-            print("  [FALLBACK] Using stub build card.")
-            build_card = _stub_select_build(brief, bands)
-    else:
-        build_card = _stub_select_build(brief, bands)
+    try:
+        build_card = select_build(brief, bands, feasibility_verdict=verdict)
+    except Exception as exc:
+        print(f"  [ERROR] select_build raised {type(exc).__name__}: {exc}")
+        sys.exit(1)
 
     print()
     print(format_build_card(build_card, brief))
@@ -548,9 +314,6 @@ def run_refinement(state: PipelineState) -> PipelineState:
     bands = state.get("price_bands")
     build_card = state.get("build_card")
 
-    if not _HAS_REFINE:
-        print("  [STUB] refinement not available  -  skipping refinement loop.")
-        return {**state, "locked_parts": {}, "current_node": "done"}
     if brief is None or bands is None or build_card is None or not build_card.parts:
         print("  No parts to refine  -  skipping refinement loop.")
         return {**state, "locked_parts": {}, "current_node": "done"}
@@ -672,8 +435,6 @@ def main() -> None:
     print(f"\n{_SEP}")
     print("  KARMA AI   -   PC Build Recommendation  (Phase 1 Pipeline)")
     print(_SEP)
-
-    _print_module_status()
 
     # ------------------------------------------------------------------
     # --fixture-all  :  run all three canonical fixtures, print table

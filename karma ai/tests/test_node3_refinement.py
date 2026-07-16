@@ -88,9 +88,9 @@ def test_dispatch_structural_edit_restarts_and_skips_other_ops(monkeypatch, budg
 
     restarted_card = _card([_part(ComponentSlot.gpu, "RESTARTED-GPU", 30000)])
 
-    def fake_run_from_brief(b, bands):
+    def fake_run_from_brief(b):
         calls["restart"] += 1
-        return {"build_card": restarted_card, "current_brief": b, "price_bands": bands}
+        return {"build_card": restarted_card, "current_brief": b}
 
     monkeypatch.setattr("agents.graph_runner.run_from_brief", fake_run_from_brief)
     monkeypatch.setattr(refine, "allocate_budget", lambda b: _bands(gpu=(20000, 25000, 30000)))
@@ -117,8 +117,8 @@ def test_dispatch_misrouted_structural_in_brief_edit_still_restarts(monkeypatch,
     brief = budget_gamer_brief.model_copy(deep=True)
     hits = {"restart": 0}
     monkeypatch.setattr("agents.graph_runner.run_from_brief",
-                        lambda b, bands: (hits.__setitem__("restart", hits["restart"] + 1)
-                                          or {"build_card": _STUB_CARD}))
+                        lambda b: (hits.__setitem__("restart", hits["restart"] + 1)
+                                  or {"build_card": _STUB_CARD}))
     monkeypatch.setattr(refine, "allocate_budget", lambda b: _bands(gpu=(20000, 25000, 30000)))
 
     ops = RefinementOps(brief_edit={"field": "primary_use_case", "value": "work_productivity"})

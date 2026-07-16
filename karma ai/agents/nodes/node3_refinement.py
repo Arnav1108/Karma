@@ -620,10 +620,14 @@ def dispatch_refinement(
                 ),
             )
         # locked_parts and rejected_parts PERSIST across a restart (task §3).
+        # new_bands is a fallback only — used if the restart short-circuits to
+        # node_surface_failure (impossible verdict) before node_allocate runs and
+        # never populates final_state["price_bands"]. NOT passed to run_from_brief:
+        # node_allocate always recomputes bands from the brief regardless.
         new_bands = allocate_budget(brief)
         from ..graph_runner import run_from_brief  # lazy: avoids graph import at module load
 
-        final_state = run_from_brief(brief, new_bands)
+        final_state = run_from_brief(brief)
         new_card = final_state.get("build_card") or build_card
         return RefinementResult(
             build_card=new_card,
@@ -1042,10 +1046,14 @@ def dispatch_refinement_v2(
                     "valid value for that field. Try rephrasing."
                 ),
             )
+        # new_bands is a fallback only — used if the restart short-circuits to
+        # node_surface_failure (impossible verdict) before node_allocate runs and
+        # never populates final_state["price_bands"]. NOT passed to run_from_brief:
+        # node_allocate always recomputes bands from the brief regardless.
         new_bands = allocate_budget(brief)
         from ..graph_runner import run_from_brief  # lazy: avoids graph import at module load
 
-        final_state = run_from_brief(brief, new_bands)
+        final_state = run_from_brief(brief)
         new_card = final_state.get("build_card") or build_card
         return RefinementResult(
             build_card=new_card,

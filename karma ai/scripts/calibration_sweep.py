@@ -97,6 +97,19 @@ def _simulate_node3_walk(catalog, bands, brief, req, verdict_tight):
     events, spend = [], 0
     in_stock = [p for p in catalog if p["in_stock"]]
 
+    # NOTE: This is a known-approximate offline proxy for the production
+    # compatibility rules in agents/db/neo4j.py (_CONSTRAINT_MAP /
+    # compatibility_check), NOT an exact mirror. Known drifts:
+    #   1. Missing the (cooler, motherboard) socket-compatibility pair that
+    #      _CONSTRAINT_MAP enforces — compat_ok does not check it.
+    #   2. Uses a ddr_gen -> ddr_type fallback for the RAM/motherboard DDR
+    #      check that the production _DDR_COMPAT_QUERY has no equivalent for.
+    #   3. No "fail open on missing data" semantics — production passes
+    #      through candidates absent from the graph (fail open), but
+    #      compat_ok resolves missing spec keys to None-comparisons instead.
+    # This proxy can drift from _CONSTRAINT_MAP over time and should be
+    # re-validated against it if the sweep is ever relied on as a go/no-go
+    # signal.
     def compat_ok(part, slot):
         s = part["specs"]
         for lslot, lp in locked.items():

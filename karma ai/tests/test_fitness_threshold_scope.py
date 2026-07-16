@@ -1,6 +1,6 @@
 """Regression coverage: derive_fitness_thresholds must only compute a
 threshold for gpu/cpu -- the only two slots with any GOOD_FOR fitness edges
-in the graph (confirmed via live query: 42 gpu / 48 cpu edges, zero for
+in the graph (confirmed via live query: 120 gpu / 124 cpu edges, zero for
 ram/storage/motherboard/psu/case/cooler/fans -- see docs/context.md open
 items 4-5). The other seven slots always fail open in fitness_filter
 regardless of the threshold passed in, so deriving one for them was a wasted

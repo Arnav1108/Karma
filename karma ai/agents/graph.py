@@ -19,40 +19,17 @@ from langgraph.graph import END, START, StateGraph
 
 from agents.state.pipeline_state import PipelineState
 
-# ---------------------------------------------------------------------------
-# Defensive node imports — node3_selector may not be merged yet.
-# ---------------------------------------------------------------------------
-
-try:
-    from agents.nodes.node1_intake import (
-        QUESTION_SEQUENCE,
-        _is_field_filled,
-        extract_turn,
-        floor_met,
-        lock_brief,
-        next_question,
-    )
-    _HAS_NODE1 = True
-except ImportError:
-    _HAS_NODE1 = False
-
-try:
-    from agents.feasibility.estimate import estimate_feasibility
-    _HAS_ESTIMATE = True
-except ImportError:
-    _HAS_ESTIMATE = False
-
-try:
-    from agents.nodes.node2_allocation import allocate_budget
-    _HAS_ALLOC = True
-except ImportError:
-    _HAS_ALLOC = False
-
-try:
-    from agents.nodes.node3_selector import ThresholdCache, select_build
-    _HAS_SELECT = True
-except ImportError:
-    _HAS_SELECT = False
+from agents.nodes.node1_intake import (
+    QUESTION_SEQUENCE,
+    _is_field_filled,
+    extract_turn,
+    floor_met,
+    lock_brief,
+    next_question,
+)
+from agents.feasibility.estimate import estimate_feasibility
+from agents.nodes.node2_allocation import allocate_budget
+from agents.nodes.node3_selector import ThresholdCache, select_build
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +54,6 @@ def node_intake(state: PipelineState) -> PipelineState:
 
     if brief is None or (hasattr(brief, "status") and brief.status == "locked"):
         return {"current_node": "node_feasibility"}  # type: ignore[return-value]
-
-    if not _HAS_NODE1:
-        return {"current_node": "node_intake"}  # type: ignore[return-value]
 
     # open_question_attempts persists across repeated node_intake invocations the
     # same way conversation_history/fitness_thresholds already do: read the
@@ -152,17 +126,7 @@ def node_feasibility(state: PipelineState) -> PipelineState:
             "current_node": "node_surface_failure",
         }
 
-    if _HAS_ESTIMATE:
-        verdict = estimate_feasibility(brief)
-    else:
-        from agents.schemas import FeasibilityVerdict
-        verdict = FeasibilityVerdict(
-            verdict="comfortable",
-            basis="stub",
-            reason="[STUB] estimate_feasibility not available",
-            binding_constraint=None,
-            suggested_adjustments=[],
-        )
+    verdict = estimate_feasibility(brief)
 
     return {  # type: ignore[return-value]
         "feasibility_verdict": verdict,
@@ -179,24 +143,7 @@ def node_allocate(state: PipelineState) -> PipelineState:
             "current_node": "node_surface_failure",
         }
 
-    if _HAS_ALLOC:
-        bands = allocate_budget(brief)
-    else:
-        from agents.schemas import PriceBands
-        from agents.schemas.price_bands import PriceBand
-        from agents.schemas import ComponentSlot
-        _stub: dict[str, dict[str, int]] = {
-            "gpu":         {"low": 18000, "mid": 22000, "high": 27000},
-            "cpu":         {"low": 10000, "mid": 13000, "high": 16000},
-            "ram":         {"low":  3500, "mid":  4500, "high":  6000},
-            "storage":     {"low":  3000, "mid":  4000, "high":  5500},
-            "motherboard": {"low":  5500, "mid":  7000, "high":  9000},
-            "psu":         {"low":  3500, "mid":  4500, "high":  6000},
-            "case":        {"low":  3000, "mid":  4000, "high":  5500},
-            "cooler":      {"low":  1500, "mid":  2500, "high":  3500},
-            "fans":        {"low":    800, "mid":  1200, "high":  1800},
-        }
-        bands = PriceBands(root={ComponentSlot(s): PriceBand(**v) for s, v in _stub.items()})
+    bands = allocate_budget(brief)
 
     return {  # type: ignore[return-value]
         "price_bands": bands,
@@ -212,11 +159,6 @@ def node_select(state: PipelineState) -> PipelineState:
     (_threshold_key(brief) == cache.key) can actually fire across repeated
     node_select invocations, instead of re-deriving thresholds every call.
     """
-    if not _HAS_SELECT:
-        return {  # type: ignore[return-value]
-            "current_node": "done",
-        }
-
     from agents.schemas import ComponentSlot
 
     brief = state.get("current_brief")

@@ -97,9 +97,9 @@ def compute_gpu_edges(rows: list[dict]) -> list[FitnessEdge]:
     # re-percentiles back to that input's own rank order regardless of the
     # constant, making general_use structurally identical to gaming.
     #
-    # On the current 14-GPU catalog, general_use still re-percentiles to the
+    # On the current 40-GPU catalog, general_use still re-percentiles to the
     # same tier as gaming for every part. Confirmed intentional, not a
-    # leftover defect: raster_norm and creation_norm are Spearman ~0.978
+    # leftover defect: raster_norm and creation_norm are Spearman ~0.985
     # correlated here, so no 0.7/0.3 blend of the two produces a rank flip.
     # Rejected alternatives for a third signal to force divergence — VRAM
     # (duplicates the hard-floor filter in catalog_floor.py, a different
