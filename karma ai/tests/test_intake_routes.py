@@ -2,16 +2,13 @@
 
 Builds the REAL app via api.main.create_app() (not a throwaway FastAPI()) so
 DI (app.state.intake_service), the real InMemorySessionStore, the real
-IntakeService, and the real exception handlers (create_app() now calls
-api.errors.register_exception_handlers(app) itself) are all wired exactly as
-production does -- no test-local handler registration needed. The intake
-router is still not mounted in main.py (that's a separate, later step), so
-this fixture mounts it locally:
-  app.include_router(intake.router, prefix="/api/v1")
-The router itself is mount-agnostic (no prefix, no auth dependency) by
-design. No auth dependency is added at mount time here -- KARMA_API_KEYS is
-unset in the test environment, so require_api_key would no-op anyway, and
-auth is out of scope for this route-contract test.
+IntakeService, the real exception handlers, and now the real intake router
+mount (create_app() calls register_exception_handlers(app) and
+app.include_router(intake.router, prefix="/api/v1",
+dependencies=[Depends(require_api_key)]) itself) are all wired exactly as
+production does -- no test-local handler registration or router mounting
+needed anymore. KARMA_API_KEYS is unset in the test environment, so
+require_api_key no-ops and these tests don't send an API key.
 
 intake_begin/intake_step are monkeypatched at the api.services.intake_service
 module level (same style as tests/test_intake_service_submit_answer.py) so no
@@ -30,7 +27,6 @@ from fastapi.testclient import TestClient
 
 from agents.nodes.node1_intake import IntakeQuestion
 from api import main as api_main
-from api.routers import intake as intake_router
 from api.services import intake_service as intake_service_module
 from tests.intake_service_fakes import FakePostgresClient
 
@@ -75,7 +71,6 @@ def app_and_service(monkeypatch):
     app = api_main.create_app()
     fake_postgres = FakePostgresClient()
     app.state.intake_service._postgres = fake_postgres
-    app.include_router(intake_router.router, prefix="/api/v1")
 
     return app, call_counts, fake_postgres
 
