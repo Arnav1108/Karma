@@ -1,8 +1,15 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from agents.db.postgres import PostgresClient
 from api.config import get_settings
 from api.routers import health
+from api.services.intake_service import IntakeService
+from api.services.session_store import InMemorySessionStore
+
+
+def get_intake_service(request: Request) -> IntakeService:
+    return request.app.state.intake_service
 
 
 def create_app() -> FastAPI:
@@ -17,6 +24,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.state.intake_service = IntakeService(InMemorySessionStore(), PostgresClient())
     # Health endpoints (/healthz, /readyz) are liveness/readiness probes — never gated.
     app.include_router(health.router)
     # Future routers attach auth at inclusion time, e.g.:
