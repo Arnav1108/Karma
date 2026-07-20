@@ -8,8 +8,7 @@ on failure" claim is actually checked against store state.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import openai
 import pytest
@@ -18,50 +17,9 @@ from agents.nodes.node1_intake import IntakeQuestion, IntakeSessionState, blank_
 from api.services import intake_service as intake_service_module
 from api.services.exceptions import LlmUpstreamError
 from api.services.intake_service import IntakeService
-from api.services.session_store import SessionRecord, SessionStore
+from tests.intake_service_fakes import FakeSessionStore
 
 pytestmark = pytest.mark.asyncio
-
-
-class FakeSessionStore(SessionStore):
-    """Minimal in-memory SessionStore that records create() calls for assertions."""
-
-    def __init__(self) -> None:
-        self.records: dict[str, SessionRecord] = {}
-        self.create_calls = 0
-
-    async def create(self, state) -> SessionRecord:
-        self.create_calls += 1
-        now = datetime.now(timezone.utc)
-        record = SessionRecord(
-            session_id=str(uuid4()),
-            state=state,
-            status="asking",
-            created_at=now,
-            last_accessed_at=now,
-        )
-        self.records[record.session_id] = record
-        return record
-
-    async def get(self, session_id: str):
-        return self.records.get(session_id)
-
-    async def peek(self, session_id: str):
-        return self.records.get(session_id)
-
-    async def update(self, session_id: str, state, status):
-        record = self.records.get(session_id)
-        if record is None:
-            return None
-        record.state = state
-        record.status = status
-        return record
-
-    async def delete(self, session_id: str) -> bool:
-        return self.records.pop(session_id, None) is not None
-
-    async def sweep_expired(self) -> int:
-        return 0
 
 
 def _known_question() -> IntakeQuestion:
