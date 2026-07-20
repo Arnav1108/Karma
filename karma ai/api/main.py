@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from agents.db.postgres import PostgresClient
 from api.config import get_settings
+from api.errors import register_exception_handlers
 from api.routers import health
 from api.services.intake_service import IntakeService
 from api.services.session_store import InMemorySessionStore
@@ -15,6 +16,7 @@ def get_intake_service(request: Request) -> IntakeService:
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="Karma Advisor API")
+    register_exception_handlers(app)
     # Empty KARMA_CORS_ORIGINS => empty allow list => browsers block all
     # cross-origin requests. Never default to "*".
     app.add_middleware(
