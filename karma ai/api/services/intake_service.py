@@ -1,10 +1,9 @@
 """IntakeService — API-facing wrapper around the core intake per-turn primitives.
 
-create_session and submit_answer are implemented; get_snapshot, lock_early, and
-abandon are stubbed per karma ai/docs/intake_service_plan.md section 1
-(implemented in a later step). See that plan for the full contract, including
-the atomicity, locking, and executor-dispatch rules the stubbed methods will
-need to follow.
+All five methods (create_session, submit_answer, get_snapshot, lock_early,
+abandon) are implemented per karma ai/docs/intake_service_plan.md section 1.
+See that plan for the full contract, including the atomicity, locking, and
+executor-dispatch rules each method follows.
 """
 
 from __future__ import annotations
@@ -20,11 +19,13 @@ from agents.nodes.node1_intake import (
     IntakeQuestion,
     IntakeSessionState,
     blank_brief,
+    floor_met,
     intake_begin,
     intake_step,
     lock_brief,
 )
 from api.services.exceptions import (
+    BriefFloorNotMetError,
     LlmUpstreamError,
     SessionAlreadyLockedError,
     SessionNotFoundError,
@@ -86,10 +87,37 @@ class IntakeService:
             return updated, question, locked
 
     async def get_snapshot(self, session_id: str) -> SessionRecord:
-        raise NotImplementedError  # implemented in a later step
+        record = await self._store.peek(session_id)
+        if record is None:
+            raise SessionNotFoundError
+        return record
 
     async def lock_early(self, session_id: str) -> SessionRecord:
-        raise NotImplementedError  # implemented in a later step
+        record = await self._store.get(session_id)
+        if record is None:
+            raise SessionNotFoundError
+        if record.status == "locked":
+            raise SessionAlreadyLockedError
+        if record.lock.locked():
+            raise TurnInProgressError
+
+        async with record.lock:
+            if not floor_met(record.state.brief):
+                missing = []
+                if record.state.brief.budget.comfortable_max <= 0:
+                    missing.append("budget")
+                if not record.state.brief.purpose.sub_case:
+                    missing.append("primary_use_case")
+                raise BriefFloorNotMetError(missing)
+
+            working_state = record.state.model_copy(deep=True)
+            working_state.brief = lock_brief(working_state.brief)
+
+            updated = await self._store.update(session_id, working_state, "locked")
+            if updated is None:
+                raise SessionNotFoundError
+
+            return updated
 
     async def abandon(self, session_id: str) -> None:
-        raise NotImplementedError  # implemented in a later step
+        await self._store.delete(session_id)
