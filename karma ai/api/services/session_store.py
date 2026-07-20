@@ -55,6 +55,12 @@ class SessionStore(ABC):
         """Return the live record, or None if missing or expired."""
 
     @abstractmethod
+    async def peek(self, session_id: str) -> SessionRecord | None:
+        """Same lazy-expiry semantics as get() (evicts and returns None if
+        expired), but never updates last_accessed_at on a hit. For read-only
+        snapshot access that must not extend the session's life."""
+
+    @abstractmethod
     async def update(
         self, session_id: str, state: Any, status: SessionStatus
     ) -> SessionRecord | None:
@@ -121,6 +127,18 @@ class InMemorySessionStore(SessionStore):
                 del self._sessions[session_id]
                 return None
             record.last_accessed_at = now
+            return record
+
+    async def peek(self, session_id: str) -> SessionRecord | None:
+        async with self._store_lock:
+            record = self._sessions.get(session_id)
+            if record is None:
+                return None
+            now = _utcnow()
+            if self._is_expired(record, now):
+                # Lazy expiry: evict so a stale session never resurrects.
+                del self._sessions[session_id]
+                return None
             return record
 
     async def update(

@@ -66,6 +66,35 @@ async def test_get_on_live_session_refreshes_last_accessed_at(clock):
     assert fetched.last_accessed_at > created_at
 
 
+async def test_peek_on_live_session_does_not_refresh_last_accessed_at(clock):
+    store = InMemorySessionStore(asking_ttl_seconds=100)
+    record = await store.create(state="x")
+    created_at = record.created_at
+
+    clock.advance(40)  # partway through the 100s asking TTL
+    fetched = await store.peek(record.session_id)
+
+    assert fetched is not None
+    assert fetched.last_accessed_at == created_at
+    assert fetched.last_accessed_at != clock.now
+
+
+async def test_peek_on_expired_session_evicts_and_returns_none(clock):
+    store = InMemorySessionStore(asking_ttl_seconds=1)
+    record = await store.create(state="x")
+
+    clock.advance(1.5)  # past the 1s asking TTL
+
+    first = await store.peek(record.session_id)
+    assert first is None
+
+    # A second call must not resurrect it - proves real eviction
+    # happened, not just a None returned for this one call.
+    second = await store.peek(record.session_id)
+    assert second is None
+    assert record.session_id not in store._sessions
+
+
 async def test_asking_session_expires_and_is_lazily_evicted(clock):
     store = InMemorySessionStore(asking_ttl_seconds=1)
     record = await store.create(state="x")
