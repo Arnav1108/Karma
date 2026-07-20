@@ -56,6 +56,24 @@ class FakeSessionStore(SessionStore):
         return 0
 
 
+class FakePostgresClient:
+    """Fake PostgresClient for IntakeService unit tests — no real DB connection.
+
+    persist_locked_brief() records each call for assertions; set raise_on_persist
+    to an exception instance to simulate a failed write on the next call.
+    """
+
+    def __init__(self) -> None:
+        self.persist_calls: list[tuple] = []
+        self.raise_on_persist: Exception | None = None
+
+    def persist_locked_brief(self, brief, session_id: str) -> None:
+        if self.raise_on_persist is not None:
+            exc, self.raise_on_persist = self.raise_on_persist, None
+            raise exc
+        self.persist_calls.append((brief, session_id))
+
+
 class ExpiringMidTurnSessionStore(FakeSessionStore):
     """FakeSessionStore variant whose update() simulates the session expiring
     mid-turn: the very first update() call after construction returns None

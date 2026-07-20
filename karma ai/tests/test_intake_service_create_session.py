@@ -17,7 +17,7 @@ from agents.nodes.node1_intake import IntakeQuestion, IntakeSessionState, blank_
 from api.services import intake_service as intake_service_module
 from api.services.exceptions import LlmUpstreamError
 from api.services.intake_service import IntakeService
-from tests.intake_service_fakes import FakeSessionStore
+from tests.intake_service_fakes import FakePostgresClient, FakeSessionStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -28,7 +28,7 @@ def _known_question() -> IntakeQuestion:
 
 async def test_create_session_stores_and_returns_on_success(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     expected_question = _known_question()
 
     def fake_intake_begin(state, phrase_fn):
@@ -51,7 +51,7 @@ async def test_create_session_stores_and_returns_on_success(monkeypatch):
 
 async def test_create_session_raises_llm_upstream_error_and_stores_nothing(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
 
     def fake_intake_begin(state, phrase_fn):
         raise openai.OpenAIError("upstream boom")
@@ -68,7 +68,7 @@ async def test_create_session_raises_llm_upstream_error_and_stores_nothing(monke
 
 async def test_create_session_calls_blank_brief_with_three_distinct_uuids(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     captured_ids: list[UUID] = []
 
     def spying_blank_brief(brief_id, user_id, chat_id, schema_version="1.0"):

@@ -23,7 +23,7 @@ from api.services.exceptions import (
     TurnInProgressError,
 )
 from api.services.intake_service import IntakeService
-from tests.intake_service_fakes import FakeSessionStore
+from tests.intake_service_fakes import FakePostgresClient, FakeSessionStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -64,7 +64,7 @@ def _spy_store_methods(monkeypatch, store, *names):
 
 async def test_get_snapshot_live_session_returns_it_via_peek(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_session(store)
 
     calls = _spy_store_methods(monkeypatch, store, "peek", "get")
@@ -78,7 +78,7 @@ async def test_get_snapshot_live_session_returns_it_via_peek(monkeypatch):
 
 async def test_get_snapshot_missing_session_raises_not_found():
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
 
     with pytest.raises(SessionNotFoundError):
         await service.get_snapshot("does-not-exist")
@@ -89,7 +89,7 @@ async def test_get_snapshot_missing_session_raises_not_found():
 
 async def test_lock_early_success_locks_and_calls_lock_brief_once(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_floor_met_session(store)
     lock_brief_calls = []
 
@@ -111,7 +111,7 @@ async def test_lock_early_success_locks_and_calls_lock_brief_once(monkeypatch):
 
 async def test_lock_early_floor_not_met_missing_budget_only(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     brief = blank_brief(uuid4(), uuid4(), uuid4())
     brief.purpose.sub_case = "video editing rig"  # budget left at sentinel 0
     state = IntakeSessionState(brief=brief, history=[])
@@ -133,7 +133,7 @@ async def test_lock_early_floor_not_met_missing_budget_only(monkeypatch):
 
 async def test_lock_early_floor_not_met_missing_both(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_session(store)  # blank_brief: budget and sub_case both sentinel
     lock_brief_calls = []
     monkeypatch.setattr(
@@ -152,7 +152,7 @@ async def test_lock_early_floor_not_met_missing_both(monkeypatch):
 
 async def test_lock_early_already_locked_does_not_call_lock_brief(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_floor_met_session(store, status="locked")
     lock_brief_calls = []
     monkeypatch.setattr(
@@ -169,7 +169,7 @@ async def test_lock_early_already_locked_does_not_call_lock_brief(monkeypatch):
 
 async def test_lock_early_turn_in_progress_fails_fast_not_queued():
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_floor_met_session(store)
 
     await record.lock.acquire()
@@ -185,7 +185,7 @@ async def test_lock_early_turn_in_progress_fails_fast_not_queued():
 
 async def test_lock_early_missing_session_raises_not_found():
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
 
     with pytest.raises(SessionNotFoundError):
         await service.lock_early("does-not-exist")
@@ -196,7 +196,7 @@ async def test_lock_early_missing_session_raises_not_found():
 
 async def test_abandon_existing_session_returns_none_and_deletes(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_session(store)
 
     result = await service.abandon(record.session_id)
@@ -207,7 +207,7 @@ async def test_abandon_existing_session_returns_none_and_deletes(monkeypatch):
 
 async def test_abandon_missing_session_does_not_raise():
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
 
     result = await service.abandon("does-not-exist")
 

@@ -35,3 +35,12 @@ class LlmUpstreamError(IntakeServiceError):
     def __init__(self, cause: Exception) -> None:
         self.cause = cause
         super().__init__(f"LLM call failed: {type(cause).__name__}: {cause}")
+
+
+class BriefPersistenceError(IntakeServiceError):
+    """The synchronous Postgres write of the newly-locked brief failed inside
+    lock_early / submit_answer's auto-lock branch. In-memory session state is
+    left unchanged (still "asking") — the caller may safely retry."""
+    def __init__(self, cause: Exception) -> None:
+        self.cause = cause
+        super().__init__(f"Failed to persist locked brief: {type(cause).__name__}: {cause}")

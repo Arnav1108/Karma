@@ -14,6 +14,7 @@ from uuid import uuid4
 
 import openai
 
+from agents.db.postgres import PostgresClient
 from agents.llm.client import StructuredCallError
 from agents.nodes.node1_intake import (
     IntakeQuestion,
@@ -26,6 +27,7 @@ from agents.nodes.node1_intake import (
 )
 from api.services.exceptions import (
     BriefFloorNotMetError,
+    BriefPersistenceError,
     LlmUpstreamError,
     SessionAlreadyLockedError,
     SessionNotFoundError,
@@ -35,8 +37,9 @@ from api.services.session_store import SessionRecord, SessionStore
 
 
 class IntakeService:
-    def __init__(self, store: SessionStore) -> None:
+    def __init__(self, store: SessionStore, postgres: PostgresClient) -> None:
         self._store = store
+        self._postgres = postgres
 
     async def create_session(
         self, client_ref: str | None = None,
@@ -79,6 +82,17 @@ class IntakeService:
                 working_state.brief = lock_brief(working_state.brief)
                 locked = True
 
+            if locked:
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            self._postgres.persist_locked_brief, working_state.brief, session_id
+                        ),
+                    )
+                except Exception as exc:
+                    raise BriefPersistenceError(exc) from exc
+
             status = "locked" if locked else "asking"
             updated = await self._store.update(session_id, working_state, status)
             if updated is None:
@@ -112,6 +126,17 @@ class IntakeService:
 
             working_state = record.state.model_copy(deep=True)
             working_state.brief = lock_brief(working_state.brief)
+
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        self._postgres.persist_locked_brief, working_state.brief, session_id
+                    ),
+                )
+            except Exception as exc:
+                raise BriefPersistenceError(exc) from exc
 
             updated = await self._store.update(session_id, working_state, "locked")
             if updated is None:

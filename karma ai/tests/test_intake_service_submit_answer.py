@@ -25,7 +25,7 @@ from api.services.exceptions import (
     TurnInProgressError,
 )
 from api.services.intake_service import IntakeService
-from tests.intake_service_fakes import ExpiringMidTurnSessionStore, FakeSessionStore
+from tests.intake_service_fakes import ExpiringMidTurnSessionStore, FakePostgresClient, FakeSessionStore
 
 pytestmark = pytest.mark.asyncio
 
@@ -49,7 +49,7 @@ async def _seed_session(store, *, status: str = "asking") -> "SessionRecord":
 
 async def test_submit_answer_normal_turn_stores_intake_step_result(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_session(store)
     expected_question = _known_question()
 
@@ -77,7 +77,7 @@ async def test_submit_answer_normal_turn_stores_intake_step_result(monkeypatch):
 
 async def test_submit_answer_llm_failure_leaves_stored_state_unchanged(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_session(store)
     snapshot_before = record.state.model_dump()
 
@@ -102,7 +102,7 @@ async def test_submit_answer_llm_failure_leaves_stored_state_unchanged(monkeypat
 
 async def test_submit_answer_sequence_exhaustion_auto_locks(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_session(store)
     lock_brief_calls = []
 
@@ -130,7 +130,7 @@ async def test_submit_answer_sequence_exhaustion_auto_locks(monkeypatch):
 
 async def test_submit_answer_explicit_early_lock_does_not_double_lock(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_session(store)
     lock_brief_calls = []
 
@@ -152,9 +152,37 @@ async def test_submit_answer_explicit_early_lock_does_not_double_lock(monkeypatc
     assert updated.status == "locked"
 
 
+async def test_submit_answer_explicit_early_lock_persists_to_postgres(monkeypatch):
+    """intake_step can lock the brief on its own (the "done"/"stop" + floor_met
+    early-exit), never passing through the service's `if not locked and question
+    is None:` exhaustion branch. persist_locked_brief must still fire for this
+    path — the service's `if locked:` persistence check runs after both possible
+    sources of locked=True are resolved, not only inside the exhaustion branch."""
+    store = FakeSessionStore()
+    postgres = FakePostgresClient()
+    service = IntakeService(store, postgres)
+    record = await _seed_session(store)
+
+    def fake_intake_step(state, answer, phrase_fn):
+        state.history.append({"role": "user", "content": answer})
+        state.brief = state.brief.model_copy(update={"status": "locked"})
+        return state, None, True
+
+    monkeypatch.setattr(intake_service_module, "intake_step", fake_intake_step)
+
+    updated, question, locked = await service.submit_answer(record.session_id, "done")
+
+    assert locked is True
+    assert len(postgres.persist_calls) == 1
+    persisted_brief, persisted_session_id = postgres.persist_calls[0]
+    assert persisted_session_id == record.session_id
+    assert persisted_brief.status == "locked"
+    assert persisted_brief is updated.state.brief
+
+
 async def test_submit_answer_session_not_found():
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
 
     with pytest.raises(SessionNotFoundError):
         await service.submit_answer("does-not-exist", "42")
@@ -162,7 +190,7 @@ async def test_submit_answer_session_not_found():
 
 async def test_submit_answer_already_locked_does_not_call_intake_step(monkeypatch):
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_session(store, status="locked")
     call_count = {"n": 0}
 
@@ -180,7 +208,7 @@ async def test_submit_answer_already_locked_does_not_call_intake_step(monkeypatc
 
 async def test_submit_answer_turn_in_progress_fails_fast_not_queued():
     store = FakeSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_session(store)
 
     await record.lock.acquire()
@@ -196,7 +224,7 @@ async def test_submit_answer_turn_in_progress_fails_fast_not_queued():
 
 async def test_submit_answer_session_expires_mid_turn(monkeypatch):
     store = ExpiringMidTurnSessionStore()
-    service = IntakeService(store)
+    service = IntakeService(store, FakePostgresClient())
     record = await _seed_session(store)
     store.simulate_expiry_on_next_update = True
 

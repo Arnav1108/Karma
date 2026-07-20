@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from psycopg2.pool import ThreadedConnectionPool
 
+from agents.schemas.brief import UserBuildBrief
 from agents.schemas.slots import ComponentSlot
 
 # Load .env so a standalone import has POSTGRES_URL available. Idempotent: only fills
@@ -149,4 +150,19 @@ class PostgresClient:
                     created_at = now()
                 """,
                 (name, category, gpu_tier, cpu_tier, vram_gb, ram_gb, storage_gb, source),
+            )
+
+    def persist_locked_brief(self, brief: UserBuildBrief, session_id: str) -> None:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO locked_briefs
+                    (brief_id, session_id, user_id, chat_id, schema_version, brief, locked_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (brief_id) DO NOTHING
+                """,
+                (
+                    str(brief.brief_id), session_id, str(brief.user_id), str(brief.chat_id),
+                    brief.schema_version, brief.model_dump_json(), brief.updated_at,
+                ),
             )
