@@ -8,6 +8,8 @@ class Settings:
     version: str
     api_keys: frozenset[str]
     cors_origins: tuple[str, ...]
+    max_concurrent_builds: int
+    build_timeout_s: float
 
 
 def _parse_api_keys(raw: str) -> frozenset[str]:
@@ -24,4 +26,10 @@ def get_settings() -> Settings:
         version=os.environ.get("KARMA_API_VERSION", "0.1.0"),
         api_keys=_parse_api_keys(os.environ.get("KARMA_API_KEYS", "")),
         cors_origins=_parse_cors_origins(os.environ.get("KARMA_CORS_ORIGINS", "")),
+        # Default 2 -- the Postgres pool is maxconn=10, shared with intake, and
+        # each build makes many sequential DB calls (build_service_plan.md section 4).
+        max_concurrent_builds=int(os.environ.get("KARMA_MAX_CONCURRENT_BUILDS", "2")),
+        # Default 300s -- reported watchdog timeout, not a hard cancellation
+        # (build_service_plan.md section 5).
+        build_timeout_s=float(os.environ.get("KARMA_BUILD_TIMEOUT_S", "300")),
     )

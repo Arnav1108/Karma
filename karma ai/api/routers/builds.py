@@ -2,10 +2,9 @@
 
 Mount-agnostic by design (docs/build_service_plan.md section 7): this file
 adds no /api/v1 prefix and no auth dependency of its own -- both are added at
-mount time, e.g. `app.include_router(builds.router, prefix="/api/v1",
-dependencies=[Depends(require_api_key)])`, mirroring api/routers/intake.py.
-Not yet wired into api/main.py -- that mounting (plus instantiating
-app.state.build_service) is a separate, later step.
+mount time by api.main.create_app() (app.include_router(builds.router,
+prefix="/api/v1", dependencies=[Depends(require_api_key)])), mirroring
+api/routers/intake.py.
 
 Every handler is `async def` (hard rule -- a sync `def` handler would run in
 FastAPI's worker-thread pool off the event loop that BuildService's registry
@@ -13,12 +12,11 @@ lock depends on, same rationale as intake.py). BuildServiceError subclasses
 are never caught here; they propagate to the handlers registered by
 api.errors.register_exception_handlers.
 
-Unlike intake.py, importing get_build_service from api.main here carries no
-circular-import risk: intake.py needed a deferred (function-scoped) import
-because api.main's create_app() imports api.routers.intake, creating a cycle
-back through api.main. api.main does not import this module yet (mounting is
-deferred per the plan), so a plain top-level import is safe -- revisit this
-once builds.router is actually wired into create_app().
+Importing get_build_service from api.main here is safe despite api.main's
+create_app() importing this module back: that import is a deferred
+(function-scoped) import inside create_app() itself, done after
+get_build_service is already defined at api.main's module level -- the same
+trick api.routers.intake relies on for get_intake_service.
 """
 
 from __future__ import annotations

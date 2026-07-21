@@ -1,42 +1,39 @@
 """Integration tests for api/routers/builds.py.
 
-Builds the REAL api.main.create_app() app (so DI, CORS, and the real
-exception handlers registered by api.errors.register_exception_handlers are
-all wired exactly as production does) but mounts api.routers.builds and
-installs app.state.build_service in the test fixture itself -- create_app()
-does not do either yet (build_service_plan.md section 7: mounting is a
-separate, later step; only the get_build_service accessor exists so far).
-This mirrors the pre-mount era of test_intake_routes.py, before
-intake.router was folded into create_app() itself.
+Builds the REAL api.main.create_app() app end-to-end -- create_app() now
+mounts builds.router itself and installs a real app.state.build_service
+(BuildService + InMemoryJobRegistry + a dedicated ThreadPoolExecutor)
+sharing the same InMemorySessionStore as app.state.intake_service, exactly
+as production does. No manual router-mounting or BuildService construction
+here anymore -- that workaround in the prior revision of this file was only
+needed while create_app() didn't wire builds itself yet.
 
-run_from_brief is monkeypatched at the api.services.build_service module
-level (never BuildService itself, per the task's instruction) so these tests
-exercise the real BuildService / InMemoryJobRegistry / mapper stack
-end-to-end without a real LLM/DB/pipeline call. KARMA_API_KEYS is unset in
-the test environment, so require_api_key no-ops, same as intake's tests.
+Sessions are seeded directly into the real store's internal dict
+(store._sessions) rather than through a full multi-turn intake conversation
+-- the same "reach past the public surface to seed test state" pattern
+test_intake_routes.py uses for _postgres. run_from_brief is monkeypatched at
+the api.services.build_service module level (never BuildService itself) so
+tests exercise the real BuildService / registry / mapper stack without a
+real LLM/DB/pipeline call. KARMA_API_KEYS is unset in the test environment,
+so require_api_key no-ops, same as intake's tests.
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pytest
-from fastapi import Depends
 from fastapi.testclient import TestClient
 
 from agents.nodes.node3_selector import SELECTION_ORDER
 from agents.schemas.build_card import BuildCard, BuildCardPart
 from api import main as api_main
-from api.middleware import require_api_key
 from api.routers import builds
 from api.services import build_service as build_service_module
-from api.services.build_service import BuildService
-from api.services.job_registry import InMemoryJobRegistry
-from api.services.session_store import SessionRecord, SessionStore
+from api.services.session_store import SessionRecord
 
 
 @dataclass
@@ -49,51 +46,19 @@ class _StateWithBrief:
     brief: _FakeBrief
 
 
-class FakeSessionStore(SessionStore):
-    """Minimal SessionStore -- records are inserted directly via put_locked/
-    put_asking (as test_build_service_start_build.py's fake does) since
-    BuildService.start_build only ever calls get()."""
-
-    def __init__(self) -> None:
-        self.records: dict[str, SessionRecord] = {}
-
-    def put_locked(self, session_id: str) -> None:
-        now = datetime.now(timezone.utc)
-        self.records[session_id] = SessionRecord(
-            session_id=session_id,
-            state=_StateWithBrief(_FakeBrief()),
-            status="locked",
-            created_at=now,
-            last_accessed_at=now,
-        )
-
-    def put_asking(self, session_id: str) -> None:
-        now = datetime.now(timezone.utc)
-        self.records[session_id] = SessionRecord(
-            session_id=session_id,
-            state=_StateWithBrief(_FakeBrief()),
-            status="asking",
-            created_at=now,
-            last_accessed_at=now,
-        )
-
-    async def create(self, state) -> SessionRecord:
-        raise NotImplementedError("unused by BuildService")
-
-    async def get(self, session_id: str):
-        return self.records.get(session_id)
-
-    async def peek(self, session_id: str):
-        return self.records.get(session_id)
-
-    async def update(self, session_id: str, state, status):
-        raise NotImplementedError("unused by BuildService")
-
-    async def delete(self, session_id: str) -> bool:
-        return self.records.pop(session_id, None) is not None
-
-    async def sweep_expired(self) -> int:
-        return 0
+def _seed_session(store, session_id: str, status: str) -> None:
+    """Writes straight into the real InMemorySessionStore's backing dict.
+    BuildService.start_build only ever reads record.status and
+    record.state.brief, so a minimal fake state is enough -- a full intake
+    conversation isn't needed to exercise the build routes."""
+    now = datetime.now(timezone.utc)
+    store._sessions[session_id] = SessionRecord(
+        session_id=session_id,
+        state=_StateWithBrief(_FakeBrief()),
+        status=status,
+        created_at=now,
+        last_accessed_at=now,
+    )
 
 
 def _make_build_card(n_parts: int | None = None) -> BuildCard:
@@ -137,33 +102,27 @@ def app_and_store(monkeypatch):
     monkeypatch.setattr(build_service_module, "_postgres_up", lambda: True)
 
     app = api_main.create_app()
-    store = FakeSessionStore()
-    registry = InMemoryJobRegistry()
-    executor = ThreadPoolExecutor(max_workers=1)
-    app.state.build_service = BuildService(
-        registry, store, executor, max_concurrent=1, timeout_s=5.0,
-    )
-    # builds.router is mount-agnostic (docstring); mounted here exactly the
-    # way create_app() will eventually mount it, since that step is deferred.
-    app.include_router(
-        builds.router, prefix="/api/v1", dependencies=[Depends(require_api_key)]
-    )
+    # The real, single, shared InMemorySessionStore -- the same instance
+    # app.state.intake_service and app.state.build_service both read from
+    # (create_app() constructs it once and passes it to both, per
+    # build_service_plan.md's "don't split state" requirement).
+    store = app.state.build_service._session_store
 
     yield app, store
-    executor.shutdown(wait=True)
 
 
 @pytest.fixture
 def client(app_and_store):
-    """A context-managed TestClient. Without `with`, starlette's TestClient
+    """Context-managed TestClient. Without `with`, starlette's TestClient
     spins up a fresh portal/event loop per call and tears it down when the
-    call returns, orphaning any asyncio.create_task scheduled during the
-    request (BuildService's fire-and-forget _run_and_store task, in
-    particular) -- it would never progress between polls. `with` keeps one
-    portal (and its background thread's running loop) alive for every
-    request the fixture makes, so the scheduled task keeps advancing in
-    real time between client.post()/client.get() calls, exactly like a real
-    server process."""
+    call returns, orphaning the fire-and-forget _run_and_store asyncio task
+    BuildService schedules -- it would never progress between polls. `with`
+    keeps one portal (and its background thread's running loop) alive for
+    every request the fixture makes, so the scheduled task keeps advancing
+    in real time between client.post()/client.get() calls, exactly like a
+    real server process. Entering/exiting also fires the app's real
+    startup/shutdown lifespan events, so app.state.build_executor is
+    cleanly shut down when each test's client closes."""
     app, _ = app_and_store
     with TestClient(app, raise_server_exceptions=False) as c:
         yield c
@@ -177,7 +136,7 @@ def test_post_builds_locked_session_polls_to_succeeded_build_card(
     client: TestClient, app_and_store, monkeypatch
 ) -> None:
     _, store = app_and_store
-    store.put_locked("sess-locked")
+    _seed_session(store, "sess-locked", "locked")
     card = _make_build_card()
     monkeypatch.setattr(build_service_module, "run_from_brief", lambda brief: {"build_card": card})
 
@@ -216,7 +175,7 @@ def test_post_builds_unlocked_session_returns_409_brief_not_locked_envelope(
     client: TestClient, app_and_store
 ) -> None:
     _, store = app_and_store
-    store.put_asking("sess-asking")
+    _seed_session(store, "sess-asking", "asking")
 
     resp = client.post("/api/v1/builds", json={"session_id": "sess-asking"})
     assert resp.status_code == 409
@@ -261,21 +220,25 @@ def test_second_concurrent_build_at_capacity_returns_429_with_retry_after(
     app_and_store, monkeypatch
 ) -> None:
     app, store = app_and_store
-    store.put_locked("sess-a")
-    store.put_locked("sess-b")
+    _seed_session(store, "sess-a", "locked")
+    _seed_session(store, "sess-b", "locked")
+    # Real create_app() sizes this from settings (default 2); force 1 here so
+    # a second concurrent POST is deterministically rejected rather than
+    # depending on the env's KARMA_MAX_CONCURRENT_BUILDS value.
+    app.state.build_service._max_concurrent = 1
 
     release_event = threading.Event()
 
     def slow_run_from_brief(brief):
         # Blocks the first build so the second POST is admitted while the
-        # first is still occupying the sole (max_concurrent=1) slot.
+        # first is still occupying the sole (overridden) slot.
         release_event.wait(timeout=5.0)
         return {"build_card": _make_build_card()}
 
     monkeypatch.setattr(build_service_module, "run_from_brief", slow_run_from_brief)
 
-    try:
-        with TestClient(app, raise_server_exceptions=False) as client:
+    with TestClient(app, raise_server_exceptions=False) as client:
+        try:
             resp1 = client.post("/api/v1/builds", json={"session_id": "sess-a"})
             assert resp1.status_code == 202
 
@@ -285,19 +248,21 @@ def test_second_concurrent_build_at_capacity_returns_429_with_retry_after(
             assert body["error"]["code"] == "BUILD_CAPACITY"
             assert body["error"]["retryable"] is True
             assert resp2.headers.get("retry-after") == "30"
-    finally:
-        release_event.set()
+        finally:
+            # Release before the `with` block exits -- app shutdown (fired on
+            # __exit__) shuts the executor down with wait=True, which would
+            # otherwise block on this still-running worker thread.
+            release_event.set()
 
 
 # ---------------------------------------------------------------------------
-# 6. builds.router is mount-agnostic; main.py is left untouched for mounting
+# 6. builds.router is mount-agnostic (proven independent of where it's mounted)
 # ---------------------------------------------------------------------------
 
 def test_builds_router_carries_no_prefix_of_its_own() -> None:
     # Same proof shape as intake's routes: the module-level router object
     # only knows its own "/builds" prefix, never "/api/v1" -- that's added
-    # at inclusion time (here in the fixture; in production, at the deferred
-    # mounting step).
+    # at inclusion time by create_app(), not baked into the router itself.
     assert builds.router.prefix == "/builds"
     paths = {route.path for route in builds.router.routes}
     assert paths == {"/builds", "/builds/{build_id}"}
