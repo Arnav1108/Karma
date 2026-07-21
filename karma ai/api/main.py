@@ -76,7 +76,10 @@ def create_app() -> FastAPI:
     # BuildService.start_build reads the locked brief straight out of the
     # same in-memory session store intake writes to; a second instance would
     # split state and every build would 404 with SessionNotFoundError.
-    session_store = InMemorySessionStore()
+    session_store = InMemorySessionStore(
+        asking_ttl_seconds=settings.session_ttl_min * 60,
+        locked_ttl_seconds=settings.locked_session_ttl_h * 3600,
+    )
     app.state.session_store = session_store
     app.state.intake_service = IntakeService(session_store, PostgresClient())
 
@@ -86,7 +89,10 @@ def create_app() -> FastAPI:
     # section 2 / section 4).
     build_executor = ThreadPoolExecutor(max_workers=settings.max_concurrent_builds)
     app.state.build_executor = build_executor
-    job_registry = InMemoryJobRegistry()
+    job_registry = InMemoryJobRegistry(
+        terminal_ttl_seconds=settings.build_result_ttl_h * 3600,
+        max_records=settings.max_job_records,
+    )
     app.state.job_registry = job_registry
     app.state.build_service = BuildService(
         job_registry,

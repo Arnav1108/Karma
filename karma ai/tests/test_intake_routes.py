@@ -22,11 +22,14 @@ real database.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 
 from agents.nodes.node1_intake import IntakeQuestion
 from api import main as api_main
+from api.config import get_settings
 from api.services import intake_service as intake_service_module
 from tests.intake_service_fakes import FakePostgresClient
 
@@ -165,3 +168,39 @@ def test_get_snapshot_mid_conversation_reconstructs_question_without_llm_call(
     # intake_begin was called exactly once, by the original create_session --
     # never again from this GET.
     assert call_counts["intake_begin"] == 1
+
+
+def test_create_session_expires_at_reflects_configured_session_ttl_min(monkeypatch) -> None:
+    """Guards the docs/hardening_plan.md section 3 expires_at ripple: with
+    KARMA_SESSION_TTL_MIN overridden to a small custom value, the expires_at
+    the route actually returns must reflect that value (via Depends(get_settings)),
+    not the hardcoded 1800s (30 min) ASKING_TTL_SECONDS default.
+    """
+    get_settings.cache_clear()
+    monkeypatch.setenv("KARMA_SESSION_TTL_MIN", "1")
+
+    def fake_intake_begin(state, phrase_fn):
+        state.history.append({"role": "assistant", "content": "What's your budget?"})
+        state.current_question_id = "budget"
+        return state, IntakeQuestion(
+            question_id="budget", text="What's your budget?", kind="sequence"
+        )
+
+    monkeypatch.setattr(intake_service_module, "intake_begin", fake_intake_begin)
+
+    app = api_main.create_app()
+    client = TestClient(app, raise_server_exceptions=False)
+
+    before = datetime.now(timezone.utc)
+    resp = client.post("/api/v1/intake/sessions", json={"client_ref": None})
+    assert resp.status_code == 201
+
+    expires_at = datetime.fromisoformat(resp.json()["expires_at"])
+    delta = expires_at - before
+
+    # 1 min TTL => ~60s, with generous slack for test execution time -- but
+    # nowhere near the 1800s (30 min) default, which is the regression this
+    # test exists to catch.
+    assert timedelta(seconds=30) < delta < timedelta(seconds=300)
+
+    get_settings.cache_clear()

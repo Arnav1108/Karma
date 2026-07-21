@@ -11,6 +11,10 @@ class Settings:
     max_concurrent_builds: int
     build_timeout_s: float
     sweep_interval_s: float
+    session_ttl_min: int
+    locked_session_ttl_h: int
+    build_result_ttl_h: int
+    max_job_records: int
 
 
 def _parse_api_keys(raw: str) -> frozenset[str]:
@@ -36,4 +40,12 @@ def get_settings() -> Settings:
         # Default 300s (5 min) -- backstops the lazy TTL eviction on
         # SessionStore/JobRegistry; see docs/hardening_plan.md section 1.
         sweep_interval_s=float(os.environ.get("KARMA_SWEEP_INTERVAL_S", "300")),
+        # Raw minutes/hours, NOT pre-converted to seconds -- each call site
+        # (InMemorySessionStore/InMemoryJobRegistry construction in main.py,
+        # expires_at computation in routers/intake.py) multiplies by 60/3600
+        # itself. See docs/hardening_plan.md section 3.
+        session_ttl_min=int(os.environ.get("KARMA_SESSION_TTL_MIN", "30")),
+        locked_session_ttl_h=int(os.environ.get("KARMA_LOCKED_SESSION_TTL_H", "24")),
+        build_result_ttl_h=int(os.environ.get("KARMA_BUILD_RESULT_TTL_H", "24")),
+        max_job_records=int(os.environ.get("KARMA_MAX_JOB_RECORDS", "500")),
     )
