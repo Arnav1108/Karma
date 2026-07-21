@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
@@ -13,6 +15,8 @@ from api.services.intake_service import IntakeService
 from api.services.job_registry import InMemoryJobRegistry
 from api.services.session_store import InMemorySessionStore
 
+logger = logging.getLogger(__name__)
+
 
 def get_intake_service(request: Request) -> IntakeService:
     return request.app.state.intake_service
@@ -22,17 +26,42 @@ def get_build_service(request: Request) -> BuildService:
     return request.app.state.build_service
 
 
+async def _sweep_loop(app: FastAPI) -> None:
+    interval = app.state.settings.sweep_interval_s
+    while True:
+        await asyncio.sleep(interval)
+        for name, store in (
+            ("sessions", app.state.session_store),
+            ("jobs", app.state.job_registry),
+        ):
+            try:
+                n = await store.sweep_expired()
+                if n:
+                    logger.info("sweep evicted %d expired %s", n, name)
+            except Exception:
+                logger.exception("sweep failed for %s", name)  # never let the loop die
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    yield
-    # app.state.build_executor is set inside create_app(), well before the
-    # app is ever actually started, so it's always present by shutdown.
-    app.state.build_executor.shutdown(wait=True)
+    sweeper = asyncio.create_task(_sweep_loop(app))
+    try:
+        yield
+    finally:
+        sweeper.cancel()
+        try:
+            await sweeper
+        except asyncio.CancelledError:
+            pass
+        # app.state.build_executor is set inside create_app(), well before the
+        # app is ever actually started, so it's always present by shutdown.
+        app.state.build_executor.shutdown(wait=True)
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="Karma Advisor API", lifespan=_lifespan)
+    app.state.settings = settings
     register_exception_handlers(app)
     # Empty KARMA_CORS_ORIGINS => empty allow list => browsers block all
     # cross-origin requests. Never default to "*".
@@ -48,6 +77,7 @@ def create_app() -> FastAPI:
     # same in-memory session store intake writes to; a second instance would
     # split state and every build would 404 with SessionNotFoundError.
     session_store = InMemorySessionStore()
+    app.state.session_store = session_store
     app.state.intake_service = IntakeService(session_store, PostgresClient())
 
     # Dedicated pool, not the default run_in_executor(None, ...) pool intake
@@ -56,8 +86,10 @@ def create_app() -> FastAPI:
     # section 2 / section 4).
     build_executor = ThreadPoolExecutor(max_workers=settings.max_concurrent_builds)
     app.state.build_executor = build_executor
+    job_registry = InMemoryJobRegistry()
+    app.state.job_registry = job_registry
     app.state.build_service = BuildService(
-        InMemoryJobRegistry(),
+        job_registry,
         session_store,
         build_executor,
         max_concurrent=settings.max_concurrent_builds,

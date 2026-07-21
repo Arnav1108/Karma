@@ -10,6 +10,7 @@ class Settings:
     cors_origins: tuple[str, ...]
     max_concurrent_builds: int
     build_timeout_s: float
+    sweep_interval_s: float
 
 
 def _parse_api_keys(raw: str) -> frozenset[str]:
@@ -32,4 +33,7 @@ def get_settings() -> Settings:
         # Default 300s -- reported watchdog timeout, not a hard cancellation
         # (build_service_plan.md section 5).
         build_timeout_s=float(os.environ.get("KARMA_BUILD_TIMEOUT_S", "300")),
+        # Default 300s (5 min) -- backstops the lazy TTL eviction on
+        # SessionStore/JobRegistry; see docs/hardening_plan.md section 1.
+        sweep_interval_s=float(os.environ.get("KARMA_SWEEP_INTERVAL_S", "300")),
     )
