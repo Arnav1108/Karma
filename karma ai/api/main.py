@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
@@ -9,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from agents.db.postgres import PostgresClient
 from api.config import get_settings
 from api.errors import register_exception_handlers
+from api.logging_config import configure_logging, request_id_var
 from api.rate_limit import RateLimiter
 from api.routers import health
 from api.services.build_service import BuildService
@@ -60,6 +62,14 @@ async def _lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # Called at the very top of create_app(), not at module level, so it runs
+    # exactly once per app construction (including in tests that call
+    # create_app() directly) and before any log statement create_app() itself
+    # can trigger further down (e.g. middleware.py's auth-disabled warning,
+    # fired lazily on first request but wired here). configure_logging() is
+    # itself idempotent (api/logging_config.py), so this is also safe on the
+    # rare path where create_app() is invoked more than once in one process.
+    configure_logging()
     settings = get_settings()
     app = FastAPI(title="Karma Advisor API", lifespan=_lifespan)
     app.state.settings = settings
@@ -73,6 +83,20 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def _request_id_middleware(request: Request, call_next):
+        # contextvars need the token/.reset(token) pattern, not a bare
+        # reassignment, to actually undo the .set() afterwards -- a plain
+        # request_id_var.set("-") in the finally block would just be another
+        # write, indistinguishable from a real (if coincidental) request id
+        # of "-"; token.reset restores the exact prior value/absence instead.
+        token = request_id_var.set(str(uuid.uuid4()))
+        try:
+            return await call_next(request)
+        finally:
+            request_id_var.reset(token)
+
     # Constructed once, shared by every rate_limit(category) dependency via
     # request.app.state.rate_limiter (docs/hardening_plan.md section 2).
     app.state.rate_limiter = RateLimiter(

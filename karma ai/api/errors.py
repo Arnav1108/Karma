@@ -23,6 +23,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from api.config import get_settings
 from api.dtos import ErrorBody, ErrorEnvelope
 from api.rate_limit import RateLimitError
 from api.services.exceptions import (
@@ -78,6 +79,13 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(TurnInProgressError)
     async def _turn_in_progress(request: Request, exc: TurnInProgressError) -> JSONResponse:
+        # Retry-After matches BuildCapacityError's existing precedent below --
+        # short and fixed, since record.lock (what this reports on) frees
+        # within one intake turn, not on a queue/backoff schedule. Read from
+        # Settings (not a module constant, unlike BUILD_CAPACITY's) because
+        # the plan calls this one out as optionally env-tunable
+        # (docs/hardening_plan.md section 6); get_settings() is a plain
+        # @lru_cache lookup, so this needs no Depends/app.state plumbing.
         return JSONResponse(
             status_code=409,
             content=_envelope(
@@ -85,6 +93,7 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "A turn is already in progress for this session. Retry shortly.",
                 True,
             ),
+            headers={"Retry-After": str(get_settings().turn_retry_after_s)},
         )
 
     @app.exception_handler(BriefFloorNotMetError)

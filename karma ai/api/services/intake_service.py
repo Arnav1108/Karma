@@ -25,6 +25,7 @@ from agents.nodes.node1_intake import (
     intake_step,
     lock_brief,
 )
+from api.logging_config import session_id_var
 from api.services.exceptions import (
     BriefFloorNotMetError,
     BriefPersistenceError,
@@ -59,6 +60,16 @@ class IntakeService:
     async def submit_answer(
         self, session_id: str, answer: str,
     ) -> tuple[SessionRecord, IntakeQuestion | None, bool]:
+        # Set as early as possible so every log line for this turn -- including
+        # a SessionNotFoundError/TurnInProgressError path below and any
+        # logger.exception(...) inside the intake_step call -- carries the
+        # session_id for free via ContextInjectingFilter (docs/hardening_plan.md
+        # section 4). No token/reset here: unlike request_id_var (one value
+        # per HTTP request, reset in main.py's middleware), session_id_var is
+        # scoped to this request's own task context already (see
+        # logging_config.py's module docstring) and this request ends shortly
+        # after this coroutine returns.
+        session_id_var.set(session_id)
         record = await self._store.get(session_id)
         if record is None:
             raise SessionNotFoundError
@@ -101,12 +112,14 @@ class IntakeService:
             return updated, question, locked
 
     async def get_snapshot(self, session_id: str) -> SessionRecord:
+        session_id_var.set(session_id)
         record = await self._store.peek(session_id)
         if record is None:
             raise SessionNotFoundError
         return record
 
     async def lock_early(self, session_id: str) -> SessionRecord:
+        session_id_var.set(session_id)
         record = await self._store.get(session_id)
         if record is None:
             raise SessionNotFoundError
@@ -145,4 +158,5 @@ class IntakeService:
             return updated
 
     async def abandon(self, session_id: str) -> None:
+        session_id_var.set(session_id)
         await self._store.delete(session_id)

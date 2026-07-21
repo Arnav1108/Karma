@@ -19,6 +19,7 @@ class Settings:
     rl_session_create_per_min: int
     rl_intake_turn_per_min: int
     rl_build_create_per_hour: int
+    turn_retry_after_s: int
 
 
 def _parse_api_keys(raw: str) -> frozenset[str]:
@@ -63,4 +64,8 @@ def get_settings() -> Settings:
         rl_session_create_per_min=int(os.environ.get("KARMA_RL_SESSION_CREATE_PER_MIN", "5")),
         rl_intake_turn_per_min=int(os.environ.get("KARMA_RL_INTAKE_TURN_PER_MIN", "20")),
         rl_build_create_per_hour=int(os.environ.get("KARMA_RL_BUILD_CREATE_PER_HOUR", "3")),
+        # Retry-After (seconds) for 409 TURN_IN_PROGRESS -- the record.lock it
+        # reports on frees within one intake turn, so a short fixed backoff is
+        # correct; see docs/hardening_plan.md section 6.
+        turn_retry_after_s=int(os.environ.get("KARMA_TURN_RETRY_AFTER_S", "1")),
     )
