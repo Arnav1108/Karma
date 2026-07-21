@@ -9,8 +9,15 @@ from __future__ import annotations
 
 from agents.nodes.node1_intake import QUESTION_SEQUENCE, IntakeQuestion, IntakeSessionState, floor_met
 from agents.schemas.brief import UserBuildBrief
+from agents.schemas.build_card import BuildCard, BuildCardPart
+from agents.schemas.feasibility import FeasibilityVerdict
 
 from api.dtos import (
+    BriefSummaryDTO,
+    BuildCardDTO,
+    BuildPartDTO,
+    BuildStatusResponse,
+    ErrorBody,
     PeripheralDTO,
     ProgressDTO,
     QuestionDTO,
@@ -18,8 +25,22 @@ from api.dtos import (
     SecondaryUseCaseDTO,
     SoftwareEntryDTO,
     SpecificPartRequestDTO,
-    BriefSummaryDTO,
+    VerdictDTO,
 )
+from api.services.job_registry import JobRecord
+
+# error_code -> retryable, for the "failed" build status. Infra flaps
+# (timeout, upstream LLM, a degraded dependency) are worth retrying; an
+# unclassified internal error is not.
+_RETRYABLE_ERROR_CODES = {
+    "BUILD_TIMEOUT": True,
+    "LLM_UPSTREAM_ERROR": True,
+    "DEGRADED_DEPENDENCY": True,
+    "DATABASE_UNAVAILABLE": True,
+    "INTERNAL_ERROR": False,
+}
+
+BUILD_POLL_AFTER_MS = 2000
 
 
 def map_question(q: IntakeQuestion) -> QuestionDTO:
@@ -159,4 +180,95 @@ def map_brief_summary(brief: UserBuildBrief, asked_so_far: list[str]) -> BriefSu
         longevity=longevity,
         extras=extras,
         hard_constraints=hard_constraints,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Build route mappers — see karma ai/docs/build_service_plan.md sections 6-7.
+# ---------------------------------------------------------------------------
+
+def map_verdict(verdict: FeasibilityVerdict) -> VerdictDTO:
+    """basis is internal diagnostics (deterministic/llm_fallback/stub) — dropped."""
+    return VerdictDTO(
+        verdict=verdict.verdict,
+        reason=verdict.reason,
+        binding_constraint=verdict.binding_constraint,
+        suggested_adjustments=list(verdict.suggested_adjustments),
+    )
+
+
+def map_build_part(part: BuildCardPart) -> BuildPartDTO:
+    return BuildPartDTO(
+        slot=part.slot.value,
+        product_id=part.product_id,
+        name=part.name,
+        brand=part.brand,
+        price_inr=part.price_inr,
+        justification=part.justification,
+    )
+
+
+def map_build_card(card: BuildCard) -> BuildCardDTO:
+    """changed_slots is omitted (v1, refinement-only, always empty on a fresh build)."""
+    return BuildCardDTO(
+        parts=[map_build_part(p) for p in card.parts],
+        total_price_inr=card.total_price_inr,
+        summary=card.summary,
+        warnings=list(card.warnings),
+    )
+
+
+def map_build_status(record: JobRecord) -> BuildStatusResponse:
+    """Discriminate on record.status per plan section 7's exact table.
+
+    The succeeded branch uses record.warnings, not build_card.warnings —
+    BuildService._classify already returns the full, merged warnings list
+    (per-slot dead-ends plus the synthesized Neo4j-degraded notice when
+    applicable), so re-reading build_card.warnings here would silently drop
+    that notice.
+    """
+    if record.status in ("queued", "running"):
+        return BuildStatusResponse(
+            build_id=record.build_id,
+            status=record.status,
+            poll_after_ms=BUILD_POLL_AFTER_MS,
+        )
+
+    if record.status == "succeeded":
+        state = record.state or {}
+        build_card = state.get("build_card")
+        verdict = state.get("feasibility_verdict")
+        card_dto = map_build_card(build_card).model_copy(update={"warnings": list(record.warnings)})
+        return BuildStatusResponse(
+            build_id=record.build_id,
+            status="succeeded",
+            build=card_dto,
+            verdict=map_verdict(verdict) if verdict is not None else None,
+        )
+
+    if record.status == "infeasible":
+        state = record.state or {}
+        verdict = state.get("feasibility_verdict")
+        return BuildStatusResponse(
+            build_id=record.build_id,
+            status="infeasible",
+            verdict=map_verdict(verdict) if verdict is not None else None,
+        )
+
+    if record.status == "cannot_proceed":
+        return BuildStatusResponse(
+            build_id=record.build_id,
+            status="cannot_proceed",
+            reason=record.error_message,
+        )
+
+    # failed
+    return BuildStatusResponse(
+        build_id=record.build_id,
+        status="failed",
+        error=ErrorBody(
+            code=record.error_code or "INTERNAL_ERROR",
+            message=record.error_message or "An internal error occurred.",
+            retryable=_RETRYABLE_ERROR_CODES.get(record.error_code, False),
+        ),
     )

@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -5,7 +8,9 @@ from agents.db.postgres import PostgresClient
 from api.config import get_settings
 from api.errors import register_exception_handlers
 from api.routers import health
+from api.services.build_service import BuildService
 from api.services.intake_service import IntakeService
+from api.services.job_registry import InMemoryJobRegistry
 from api.services.session_store import InMemorySessionStore
 
 
@@ -13,9 +18,21 @@ def get_intake_service(request: Request) -> IntakeService:
     return request.app.state.intake_service
 
 
+def get_build_service(request: Request) -> BuildService:
+    return request.app.state.build_service
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    yield
+    # app.state.build_executor is set inside create_app(), well before the
+    # app is ever actually started, so it's always present by shutdown.
+    app.state.build_executor.shutdown(wait=True)
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
-    app = FastAPI(title="Karma Advisor API")
+    app = FastAPI(title="Karma Advisor API", lifespan=_lifespan)
     register_exception_handlers(app)
     # Empty KARMA_CORS_ORIGINS => empty allow list => browsers block all
     # cross-origin requests. Never default to "*".
@@ -26,18 +43,41 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    app.state.intake_service = IntakeService(InMemorySessionStore(), PostgresClient())
+    # Constructed once and shared between IntakeService and BuildService --
+    # BuildService.start_build reads the locked brief straight out of the
+    # same in-memory session store intake writes to; a second instance would
+    # split state and every build would 404 with SessionNotFoundError.
+    session_store = InMemorySessionStore()
+    app.state.intake_service = IntakeService(session_store, PostgresClient())
+
+    # Dedicated pool, not the default run_in_executor(None, ...) pool intake
+    # shares, so long builds cannot starve intake's short LLM turns -- and so
+    # bounding max_workers *is* the concurrency cap (build_service_plan.md
+    # section 2 / section 4).
+    build_executor = ThreadPoolExecutor(max_workers=settings.max_concurrent_builds)
+    app.state.build_executor = build_executor
+    app.state.build_service = BuildService(
+        InMemoryJobRegistry(),
+        session_store,
+        build_executor,
+        max_concurrent=settings.max_concurrent_builds,
+        timeout_s=settings.build_timeout_s,
+    )
+
     # Health endpoints (/healthz, /readyz) are liveness/readiness probes — never gated.
     app.include_router(health.router)
-    # Deferred (function-scoped) imports: api.routers.intake imports get_intake_service
-    # back from this module, which isn't set on api.main until this point in its own
-    # top-to-bottom execution — importing it at module level here would cycle back into
-    # this file before get_intake_service exists. By the time create_app() actually runs
-    # (app = create_app() at the bottom of this module), api.main is already fully
-    # initialized, so the deferred import resolves cleanly.
+    # Deferred (function-scoped) imports: api.routers.intake/builds import
+    # get_intake_service/get_build_service back from this module, which isn't
+    # set on api.main until this point in its own top-to-bottom execution —
+    # importing them at module level here would cycle back into this file
+    # before those accessors exist. By the time create_app() actually runs
+    # (app = create_app() at the bottom of this module), api.main is already
+    # fully initialized, so the deferred import resolves cleanly.
     from api.middleware import require_api_key
-    from api.routers import intake
+    from api.routers import builds, intake
     app.include_router(intake.router, prefix="/api/v1", dependencies=[Depends(require_api_key)])
+    app.include_router(builds.router, prefix="/api/v1", dependencies=[Depends(require_api_key)])
+
     return app
 
 

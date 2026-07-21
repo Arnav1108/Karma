@@ -44,3 +44,29 @@ class BriefPersistenceError(IntakeServiceError):
     def __init__(self, cause: Exception) -> None:
         self.cause = cause
         super().__init__(f"Failed to persist locked brief: {type(cause).__name__}: {cause}")
+
+
+class BuildServiceError(Exception):
+    """Base for all BuildService-raised exceptions."""
+
+
+class BriefNotLockedError(BuildServiceError):
+    """Session exists but record.status != "locked" — the brief isn't ready to build."""
+
+
+class BuildNotFoundError(BuildServiceError):
+    """build_id is unknown or has been evicted (TTL/LRU) from the JobRegistry."""
+
+
+class BuildCapacityError(BuildServiceError):
+    """Active build count is already at max_concurrent; retryable — the caller
+    should back off and retry rather than the request queueing invisibly."""
+
+
+class BuildAlreadyActiveError(BuildServiceError):
+    """A build for this session is already queued/running. Non-retryable — a
+    blind re-POST would fail identically every time. Carries build_id of the
+    already-active build so the client can switch to polling it instead."""
+    def __init__(self, build_id: str) -> None:
+        self.build_id = build_id
+        super().__init__(f"A build is already active for this session: {build_id}")

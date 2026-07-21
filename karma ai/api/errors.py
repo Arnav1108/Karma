@@ -26,13 +26,23 @@ from fastapi.responses import JSONResponse
 from api.dtos import ErrorBody, ErrorEnvelope
 from api.services.exceptions import (
     BriefFloorNotMetError,
+    BriefNotLockedError,
     BriefPersistenceError,
+    BuildAlreadyActiveError,
+    BuildCapacityError,
+    BuildNotFoundError,
+    BuildServiceError,
     IntakeServiceError,
     LlmUpstreamError,
     SessionAlreadyLockedError,
     SessionNotFoundError,
     TurnInProgressError,
 )
+
+# Retry-After value (seconds) for 429 BUILD_CAPACITY -- build-duration order,
+# per build_service_plan.md section 4 / section 7 table. Tunable; unconfirmed
+# exact value flagged as an open question in the plan's section 8 item 7.
+BUILD_CAPACITY_RETRY_AFTER_SECONDS = "30"
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +126,67 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "Failed to persist the locked brief. Please retry.",
                 True,
             ),
+        )
+
+    # -----------------------------------------------------------------
+    # Build route handlers -- see build_service_plan.md section 7's
+    # exception -> HTTP mapping table. SessionNotFoundError is shared with
+    # intake (BuildService raises the same exception class) and already has
+    # a handler registered above -- not duplicated here.
+    # -----------------------------------------------------------------
+
+    @app.exception_handler(BriefNotLockedError)
+    async def _brief_not_locked(request: Request, exc: BriefNotLockedError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content=_envelope(
+                "BRIEF_NOT_LOCKED",
+                "The session's brief is not locked yet; it cannot be built.",
+                False,
+            ),
+        )
+
+    @app.exception_handler(BuildNotFoundError)
+    async def _build_not_found(request: Request, exc: BuildNotFoundError) -> JSONResponse:
+        return JSONResponse(
+            status_code=404,
+            content=_envelope("BUILD_NOT_FOUND", "Build not found or has expired.", False),
+        )
+
+    @app.exception_handler(BuildCapacityError)
+    async def _build_capacity(request: Request, exc: BuildCapacityError) -> JSONResponse:
+        return JSONResponse(
+            status_code=429,
+            content=_envelope(
+                "BUILD_CAPACITY",
+                "The build service is at capacity. Please retry shortly.",
+                True,
+            ),
+            headers={"Retry-After": BUILD_CAPACITY_RETRY_AFTER_SECONDS},
+        )
+
+    @app.exception_handler(BuildAlreadyActiveError)
+    async def _build_already_active(
+        request: Request, exc: BuildAlreadyActiveError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content=_envelope(
+                "BUILD_ALREADY_ACTIVE",
+                "A build is already active for this session.",
+                False,
+                details={"build_id": exc.build_id},
+            ),
+        )
+
+    @app.exception_handler(BuildServiceError)
+    async def _build_service_error(request: Request, exc: BuildServiceError) -> JSONResponse:
+        # Catch-all safety net for any BuildServiceError subclass without its
+        # own handler above -- same MRO-walk rationale as IntakeServiceError's.
+        logger.exception("Unhandled BuildServiceError subclass")
+        return JSONResponse(
+            status_code=500,
+            content=_envelope("INTERNAL_ERROR", "An internal error occurred.", False),
         )
 
     @app.exception_handler(IntakeServiceError)
