@@ -22,9 +22,17 @@ import openai
 import pytest
 
 from agents.llm.client import StructuredCallError
+from agents.nodes.node3_selector import SELECTION_ORDER
+from agents.schemas.build_card import BuildCard, BuildCardPart
+from agents.schemas.feasibility import FeasibilityVerdict
 from api.services import build_service as build_service_module
-from api.services.build_service import BuildService
-from api.services.exceptions import BriefNotLockedError, BuildCapacityError, SessionNotFoundError
+from api.services.build_service import NEO4J_DEGRADED_WARNING, BuildService
+from api.services.exceptions import (
+    BriefNotLockedError,
+    BuildCapacityError,
+    BuildNotFoundError,
+    SessionNotFoundError,
+)
 from api.services.job_registry import InMemoryJobRegistry
 from api.services.session_store import SessionRecord, SessionStore
 
@@ -112,6 +120,28 @@ def _make_service(store, *, max_concurrent=2, timeout_s=5.0, executor=None):
         registry, store, executor, max_concurrent=max_concurrent, timeout_s=timeout_s,
     )
     return service, registry, executor
+
+
+def _make_build_card(n_parts: int, warnings: list[str] | None = None) -> BuildCard:
+    """A BuildCard with n_parts filled slots, in SELECTION_ORDER order, so
+    tests can construct full (n == len(SELECTION_ORDER)) or partial/empty
+    (n < len(SELECTION_ORDER)) cards without hardcoding the slot count."""
+    parts = [
+        BuildCardPart(
+            slot=slot,
+            product_id=f"prod-{i}",
+            name=f"Part {i}",
+            price_inr=1000,
+            justification="test",
+        )
+        for i, slot in enumerate(SELECTION_ORDER[:n_parts])
+    ]
+    return BuildCard(
+        parts=parts,
+        total_price_inr=sum(p.price_inr for p in parts),
+        summary="test build",
+        warnings=warnings or [],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -343,3 +373,147 @@ async def test_generic_exception_during_build_marks_job_failed_without_crashing(
         assert len(service._tasks) == 0
     finally:
         executor.shutdown(wait=True)
+
+
+# ---------------------------------------------------------------------------
+# 8. _classify - full result mapping (plan section 6's classification table)
+# ---------------------------------------------------------------------------
+
+async def test_full_build_card_succeeds_with_no_synthetic_neo4j_warning(monkeypatch):
+    card = _make_build_card(len(SELECTION_ORDER))
+    monkeypatch.setattr(build_service_module, "run_from_brief", lambda brief: {"build_card": card})
+    # Full parts skips the Postgres probe entirely; only Neo4j is checked.
+    monkeypatch.setattr(build_service_module, "_neo4j_up", lambda: True)
+
+    store = FakeSessionStore()
+    store.put_locked("sess-1")
+    service, registry, executor = _make_service(store, timeout_s=5.0)
+
+    try:
+        build_id = await service.start_build("sess-1")
+        record = await _wait_for_terminal(registry, build_id)
+
+        assert record.status == "succeeded"
+        assert record.error_code is None
+        assert record.warnings == []
+        assert NEO4J_DEGRADED_WARNING not in record.warnings
+    finally:
+        executor.shutdown(wait=True)
+
+
+async def test_empty_parts_with_postgres_up_is_a_genuine_succeeded_dead_end(monkeypatch):
+    original_warnings = ["No compatible motherboard found within budget."]
+    card = _make_build_card(0, warnings=original_warnings)
+    monkeypatch.setattr(build_service_module, "run_from_brief", lambda brief: {"build_card": card})
+    monkeypatch.setattr(build_service_module, "_postgres_up", lambda: True)
+    monkeypatch.setattr(build_service_module, "_neo4j_up", lambda: True)
+
+    store = FakeSessionStore()
+    store.put_locked("sess-1")
+    service, registry, executor = _make_service(store, timeout_s=5.0)
+
+    try:
+        build_id = await service.start_build("sess-1")
+        record = await _wait_for_terminal(registry, build_id)
+
+        assert record.status == "succeeded"
+        assert record.error_code is None
+        # Passed through unchanged - no warning synthesized for this case.
+        assert record.warnings == original_warnings
+    finally:
+        executor.shutdown(wait=True)
+
+
+async def test_empty_parts_with_postgres_down_is_degraded_dependency_failure(monkeypatch):
+    card = _make_build_card(0, warnings=["No compatible motherboard found within budget."])
+    monkeypatch.setattr(build_service_module, "run_from_brief", lambda brief: {"build_card": card})
+    monkeypatch.setattr(build_service_module, "_postgres_up", lambda: False)
+    monkeypatch.setattr(build_service_module, "_neo4j_up", lambda: True)
+
+    store = FakeSessionStore()
+    store.put_locked("sess-1")
+    service, registry, executor = _make_service(store, timeout_s=5.0)
+
+    try:
+        build_id = await service.start_build("sess-1")
+        record = await _wait_for_terminal(registry, build_id)
+
+        assert record.status == "failed"
+        assert record.error_code == "DEGRADED_DEPENDENCY"
+    finally:
+        executor.shutdown(wait=True)
+
+
+async def test_impossible_verdict_with_no_build_card_is_infeasible(monkeypatch):
+    verdict = FeasibilityVerdict(
+        verdict="impossible",
+        basis="deterministic",
+        reason="Budget cannot cover a compatible GPU + CPU pair.",
+        binding_constraint="budget",
+    )
+    monkeypatch.setattr(
+        build_service_module, "run_from_brief", lambda brief: {"feasibility_verdict": verdict}
+    )
+    monkeypatch.setattr(build_service_module, "_neo4j_up", lambda: True)
+
+    store = FakeSessionStore()
+    store.put_locked("sess-1")
+    service, registry, executor = _make_service(store, timeout_s=5.0)
+
+    try:
+        build_id = await service.start_build("sess-1")
+        record = await _wait_for_terminal(registry, build_id)
+
+        assert record.status == "infeasible"
+        assert record.error_code is None
+    finally:
+        executor.shutdown(wait=True)
+
+
+async def test_neo4j_down_appends_synthetic_warning_to_otherwise_succeeded_build(monkeypatch):
+    original_warnings = ["preexisting dead-end warning"]
+    card = _make_build_card(len(SELECTION_ORDER), warnings=original_warnings)
+    monkeypatch.setattr(build_service_module, "run_from_brief", lambda brief: {"build_card": card})
+    monkeypatch.setattr(build_service_module, "_neo4j_up", lambda: False)
+
+    store = FakeSessionStore()
+    store.put_locked("sess-1")
+    service, registry, executor = _make_service(store, timeout_s=5.0)
+
+    try:
+        build_id = await service.start_build("sess-1")
+        record = await _wait_for_terminal(registry, build_id)
+
+        assert record.status == "succeeded"
+        # Appended after the existing warnings, not replacing them.
+        assert record.warnings == original_warnings + [NEO4J_DEGRADED_WARNING]
+    finally:
+        executor.shutdown(wait=True)
+
+
+# ---------------------------------------------------------------------------
+# 9. get_build_status
+# ---------------------------------------------------------------------------
+
+async def test_get_build_status_returns_existing_record(monkeypatch):
+    store = FakeSessionStore()
+    service, registry, executor = _make_service(store, timeout_s=5.0)
+
+    try:
+        job = await registry.create("sess-1")
+        record = await service.get_build_status(job.build_id)
+        assert record.build_id == job.build_id
+        assert record.session_id == "sess-1"
+    finally:
+        executor.shutdown(wait=False)
+
+
+async def test_get_build_status_raises_build_not_found_for_unknown_id(monkeypatch):
+    store = FakeSessionStore()
+    service, registry, executor = _make_service(store, timeout_s=5.0)
+
+    try:
+        with pytest.raises(BuildNotFoundError):
+            await service.get_build_status("nonexistent-build-id")
+    finally:
+        executor.shutdown(wait=False)
