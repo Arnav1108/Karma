@@ -22,6 +22,20 @@ CREATE TABLE IF NOT EXISTS locked_briefs (
 CREATE INDEX IF NOT EXISTS idx_locked_briefs_session_id ON locked_briefs (session_id);
 CREATE INDEX IF NOT EXISTS idx_locked_briefs_user_id    ON locked_briefs (user_id);
 
+-- STATUS on the live Supabase database (karma ai/docs/build_service_plan.md Phase
+-- 4 work): only the CREATE TABLE and CREATE INDEX statements above were actually
+-- run there. This ENABLE ROW LEVEL SECURITY / CREATE POLICY block below was
+-- skipped — it references a Postgres role, "api_write_role", that does not exist
+-- yet, and applying it as part of the same transaction rolled the whole script
+-- back (including the table) until the RLS block was excluded. The live
+-- locked_briefs table currently has RLS disabled. This is a known follow-up, not
+-- an oversight: the role POSTGRES_URL actually connects as is "postgres" (the
+-- table owner), and Postgres exempts owners/superusers from RLS enforcement by
+-- default regardless of whether RLS is enabled — so no real access-control gap
+-- exists today. Low-risk for now; revisit once real role-based access (a
+-- non-owner "api_write_role" that writes are actually funneled through) is
+-- designed, at which point this block can be applied on its own.
+
 ALTER TABLE locked_briefs ENABLE ROW LEVEL SECURITY;
 
 -- TODO(rls-role): "api_write_role" below is a placeholder — this session has not
