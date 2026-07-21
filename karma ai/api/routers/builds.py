@@ -26,12 +26,18 @@ from fastapi import APIRouter, Depends, status
 from api.dtos import BuildAcceptedDTO, BuildStatusResponse, StartBuildRequest
 from api.main import get_build_service
 from api.mappers import map_build_status
+from api.rate_limit import rate_limit
 from api.services.build_service import BuildService
 
 router = APIRouter(prefix="/builds")
 
 
-@router.post("", response_model=BuildAcceptedDTO, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "",
+    response_model=BuildAcceptedDTO,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(rate_limit("build_create"))],
+)
 async def start_build(
     body: StartBuildRequest,
     service: BuildService = Depends(get_build_service),

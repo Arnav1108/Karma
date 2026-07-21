@@ -20,6 +20,7 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, Response, status
 
 from agents.nodes.node1_intake import IntakeSessionState
+from api.config import Settings, get_settings
 from api.dtos import (
     AnswerAskingResponse,
     AnswerLockedResponse,
@@ -32,8 +33,8 @@ from api.dtos import (
 )
 from api.main import get_intake_service
 from api.mappers import map_brief_summary, map_progress, map_question
+from api.rate_limit import rate_limit
 from api.services.intake_service import IntakeService
-from api.services.session_store import ASKING_TTL_SECONDS, LOCKED_TTL_SECONDS
 
 router = APIRouter(prefix="/intake")
 
@@ -67,11 +68,15 @@ def _reconstruct_question(state: IntakeSessionState) -> QuestionDTO | None:
 
 
 @router.post(
-    "/sessions", response_model=CreateSessionResponse, status_code=status.HTTP_201_CREATED
+    "/sessions",
+    response_model=CreateSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("session_create"))],
 )
 async def create_session(
     body: CreateSessionRequest,
     service: IntakeService = Depends(get_intake_service),
+    settings: Settings = Depends(get_settings),
 ) -> CreateSessionResponse:
     record, question = await service.create_session(body.client_ref)
     return CreateSessionResponse(
@@ -79,15 +84,19 @@ async def create_session(
         status="asking",
         question=map_question(question),
         progress=map_progress(record.state, record.state.brief),
-        expires_at=record.created_at + timedelta(seconds=ASKING_TTL_SECONDS),
+        expires_at=record.created_at + timedelta(minutes=settings.session_ttl_min),
     )
 
 
-@router.post("/sessions/{session_id}/answers")
+@router.post(
+    "/sessions/{session_id}/answers",
+    dependencies=[Depends(rate_limit("intake_turn"))],
+)
 async def submit_answer(
     session_id: str,
     body: SubmitAnswerRequest,
     service: IntakeService = Depends(get_intake_service),
+    settings: Settings = Depends(get_settings),
 ) -> AnswerAskingResponse | AnswerLockedResponse:
     record, question, locked = await service.submit_answer(session_id, body.answer)
 
@@ -102,7 +111,7 @@ async def submit_answer(
         status="asking",
         question=map_question(question),
         progress=map_progress(record.state, record.state.brief),
-        expires_at=record.last_accessed_at + timedelta(seconds=ASKING_TTL_SECONDS),
+        expires_at=record.last_accessed_at + timedelta(minutes=settings.session_ttl_min),
     )
 
 
@@ -110,6 +119,7 @@ async def submit_answer(
 async def get_snapshot(
     session_id: str,
     service: IntakeService = Depends(get_intake_service),
+    settings: Settings = Depends(get_settings),
 ) -> SnapshotResponse:
     record = await service.get_snapshot(session_id)
     state = record.state
@@ -117,18 +127,18 @@ async def get_snapshot(
     if record.status == "locked":
         question = None
         brief_summary = map_brief_summary(state.brief, state.asked_so_far)
-        ttl_seconds = LOCKED_TTL_SECONDS
+        ttl_delta = timedelta(hours=settings.locked_session_ttl_h)
     else:
         question = _reconstruct_question(state)
         brief_summary = None
-        ttl_seconds = ASKING_TTL_SECONDS
+        ttl_delta = timedelta(minutes=settings.session_ttl_min)
 
     return SnapshotResponse(
         status=record.status,
         question=question,
         progress=map_progress(state, state.brief),
         brief_summary=brief_summary,
-        expires_at=record.last_accessed_at + timedelta(seconds=ttl_seconds),
+        expires_at=record.last_accessed_at + ttl_delta,
     )
 
 

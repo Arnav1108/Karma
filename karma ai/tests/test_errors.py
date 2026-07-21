@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from pydantic import BaseModel
 import pytest
 
+from api.config import get_settings
 from api.errors import register_exception_handlers
 from api.services.exceptions import (
     BriefFloorNotMetError,
@@ -27,6 +28,17 @@ from api.services.exceptions import (
 
 class _DummyBody(BaseModel):
     answer: str
+
+
+@pytest.fixture(autouse=True)
+def _clear_settings_cache():
+    # get_settings() is @lru_cache -- the TurnInProgressError handler now
+    # reads it directly (docs/hardening_plan.md section 6), so env vars set
+    # by the Retry-After tests below must not leak into (or be clobbered by)
+    # other test modules relying on the process-wide cached Settings.
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -98,6 +110,20 @@ def test_turn_in_progress(client: TestClient) -> None:
     assert body["error"]["code"] == "TURN_IN_PROGRESS"
     assert body["error"]["retryable"] is True
     assert "details" not in body["error"]
+    # Default KARMA_TURN_RETRY_AFTER_S=1 -- docs/hardening_plan.md section 6.
+    assert resp.headers["Retry-After"] == "1"
+
+
+def test_turn_in_progress_retry_after_is_env_configurable(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KARMA_TURN_RETRY_AFTER_S", "5")
+    get_settings.cache_clear()
+
+    resp = client.get("/turn-in-progress")
+
+    assert resp.status_code == 409
+    assert resp.headers["Retry-After"] == "5"
 
 
 def test_brief_floor_not_met(client: TestClient) -> None:

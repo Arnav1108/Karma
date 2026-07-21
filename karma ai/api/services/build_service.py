@@ -8,6 +8,7 @@ sections 2-6.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
@@ -19,6 +20,7 @@ from agents.graph_runner import run_from_brief
 from agents.llm.client import StructuredCallError
 from agents.nodes.node3_selector import SELECTION_ORDER
 from agents.schemas import ComponentSlot, UserBuildBrief
+from api.logging_config import build_id_var, session_id_var
 from api.services.exceptions import (
     BriefNotLockedError,
     BuildCapacityError,
@@ -79,6 +81,10 @@ class BuildService:
         self._tasks: set[asyncio.Task] = set()
 
     async def start_build(self, session_id: str) -> str:
+        # session_id is known immediately; set it before build_id_var exists
+        # so even the SessionNotFoundError/BriefNotLockedError/BuildCapacityError
+        # paths below carry it (docs/hardening_plan.md section 4).
+        session_id_var.set(session_id)
         record = await self._session_store.get(session_id)
         if record is None:
             raise SessionNotFoundError
@@ -91,17 +97,34 @@ class BuildService:
             self._active_builds += 1
 
         job = await self._registry.create(session_id)
-        task = asyncio.create_task(self._run_and_store(job.build_id, record.state.brief))
+        build_id_var.set(job.build_id)
+        task = asyncio.create_task(
+            self._run_and_store(job.build_id, session_id, record.state.brief)
+        )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return job.build_id
 
-    async def _run_and_store(self, build_id: str, brief: UserBuildBrief) -> None:
+    async def _run_and_store(self, build_id: str, session_id: str, brief: UserBuildBrief) -> None:
+        # asyncio.create_task() already copies the caller's context at
+        # creation time, so this task inherits the vars start_build just set --
+        # these two .set() calls are belt-and-suspenders explicitness (correct
+        # regardless of that propagation detail) and, more importantly, the
+        # values these worker-thread submissions below need to copy forward.
+        build_id_var.set(build_id)
+        session_id_var.set(session_id)
         await self._registry.update(build_id, status="running", started_at=_utcnow())
         loop = asyncio.get_running_loop()
         # Hold the raw executor future (not just the wait_for-wrapped one) - see
         # the finally block below for why this matters for capacity reclamation.
-        cf = self._executor.submit(run_from_brief, brief)
+        # contextvars are NOT propagated into executor worker threads on their
+        # own (unlike asyncio.Task) -- copy_context() + ctx.run(...) carries
+        # build_id_var/session_id_var into the thread running run_from_brief,
+        # so its logging (and anything it logs on the way to a raised
+        # exception) correlates too. Recommended only for builds, per plan
+        # section 4 -- skipped for intake_service's shorter-lived executor calls.
+        ctx = contextvars.copy_context()
+        cf = self._executor.submit(ctx.run, run_from_brief, brief)
         try:
             state = await asyncio.wait_for(asyncio.wrap_future(cf, loop=loop), timeout=self._timeout_s)
             # The Postgres/Neo4j probes _classify performs are genuine I/O and
