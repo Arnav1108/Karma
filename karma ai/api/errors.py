@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 
 from api.config import get_settings
 from api.dtos import ErrorBody, ErrorEnvelope
+from api.middleware import UnauthorizedError
 from api.rate_limit import RateLimitError
 from api.services.exceptions import (
     BriefFloorNotMetError,
@@ -224,6 +225,15 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=500,
             content=_envelope("INTERNAL_ERROR", "An internal error occurred.", False),
+        )
+
+    @app.exception_handler(UnauthorizedError)
+    async def _unauthorized(request: Request, exc: UnauthorizedError) -> JSONResponse:
+        # Normalized to the shared envelope (retryable=false) so the 401 body matches
+        # every other error's shape, rather than FastAPI's default {"detail": ...}.
+        return JSONResponse(
+            status_code=401,
+            content=_envelope("UNAUTHORIZED", "Invalid or missing API key.", False),
         )
 
     @app.exception_handler(RequestValidationError)

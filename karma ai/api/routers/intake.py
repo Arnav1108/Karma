@@ -90,6 +90,7 @@ async def create_session(
 
 @router.post(
     "/sessions/{session_id}/answers",
+    response_model=AnswerAskingResponse | AnswerLockedResponse,
     dependencies=[Depends(rate_limit("intake_turn"))],
 )
 async def submit_answer(
