@@ -31,6 +31,7 @@ from api.dtos import (
     SnapshotResponse,
     SubmitAnswerRequest,
 )
+from api.errors import UNAUTHORIZED_RESPONSE, error_response
 from api.main import get_intake_service
 from api.mappers import map_brief_summary, map_progress, map_question
 from api.rate_limit import rate_limit
@@ -72,6 +73,14 @@ def _reconstruct_question(state: IntakeSessionState) -> QuestionDTO | None:
     response_model=CreateSessionResponse,
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(rate_limit("session_create"))],
+    responses={
+        **UNAUTHORIZED_RESPONSE,
+        422: error_response("VALIDATION_ERROR — request body failed validation."),
+        429: error_response(
+            "RATE_LIMITED — session-create quota exceeded (Retry-After set)."
+        ),
+        502: error_response("LLM_UPSTREAM_ERROR — the intake phrasing LLM call failed."),
+    },
 )
 async def create_session(
     body: CreateSessionRequest,
@@ -92,6 +101,22 @@ async def create_session(
     "/sessions/{session_id}/answers",
     response_model=AnswerAskingResponse | AnswerLockedResponse,
     dependencies=[Depends(rate_limit("intake_turn"))],
+    responses={
+        **UNAUTHORIZED_RESPONSE,
+        404: error_response("SESSION_NOT_FOUND — unknown or expired session."),
+        409: error_response(
+            "SESSION_ALREADY_LOCKED (session already locked) or TURN_IN_PROGRESS "
+            "(a concurrent turn is running; Retry-After set)."
+        ),
+        422: error_response("VALIDATION_ERROR — request body failed validation."),
+        429: error_response(
+            "RATE_LIMITED — intake-turn quota exceeded (Retry-After set)."
+        ),
+        502: error_response("LLM_UPSTREAM_ERROR — an intake LLM call failed."),
+        503: error_response(
+            "DATABASE_UNAVAILABLE — persisting the auto-locked brief to Postgres failed."
+        ),
+    },
 )
 async def submit_answer(
     session_id: str,
@@ -116,7 +141,14 @@ async def submit_answer(
     )
 
 
-@router.get("/sessions/{session_id}", response_model=SnapshotResponse)
+@router.get(
+    "/sessions/{session_id}",
+    response_model=SnapshotResponse,
+    responses={
+        **UNAUTHORIZED_RESPONSE,
+        404: error_response("SESSION_NOT_FOUND — unknown or expired session."),
+    },
+)
 async def get_snapshot(
     session_id: str,
     service: IntakeService = Depends(get_intake_service),
@@ -143,7 +175,22 @@ async def get_snapshot(
     )
 
 
-@router.post("/sessions/{session_id}/lock", response_model=LockResponse)
+@router.post(
+    "/sessions/{session_id}/lock",
+    response_model=LockResponse,
+    responses={
+        **UNAUTHORIZED_RESPONSE,
+        404: error_response("SESSION_NOT_FOUND — unknown or expired session."),
+        409: error_response(
+            "SESSION_ALREADY_LOCKED (already locked), TURN_IN_PROGRESS (a concurrent "
+            "turn is running; Retry-After set), or BRIEF_FLOOR_NOT_MET (budget/primary "
+            "use case unanswered; details.missing lists the fields)."
+        ),
+        503: error_response(
+            "DATABASE_UNAVAILABLE — persisting the locked brief to Postgres failed."
+        ),
+    },
+)
 async def lock_session(
     session_id: str,
     service: IntakeService = Depends(get_intake_service),
@@ -155,7 +202,11 @@ async def lock_session(
     )
 
 
-@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={**UNAUTHORIZED_RESPONSE},
+)
 async def abandon_session(
     session_id: str,
     service: IntakeService = Depends(get_intake_service),

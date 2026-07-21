@@ -57,6 +57,29 @@ def _envelope(code: str, message: str, retryable: bool, details: dict | None = N
     return envelope.model_dump(exclude_none=True)
 
 
+def error_response(description: str) -> dict:
+    """Build an OpenAPI `responses` entry for an error-enveloped HTTP status.
+
+    FastAPI's automatic generation cannot infer the custom exception handlers'
+    response shapes, so the routers attach these explicitly (see
+    docs/frontend_contract_plan.md section 1.3). Every error body shares the
+    ErrorEnvelope model; because several error *codes* can map to one HTTP status
+    (e.g. 409 covers SESSION_ALREADY_LOCKED / TURN_IN_PROGRESS / BRIEF_FLOOR_NOT_MET),
+    the description enumerates the codes for that status.
+
+    Never add a 504 entry via this helper: no code path emits INTAKE_TURN_TIMEOUT
+    today, so documenting it would misrepresent the live contract
+    (frontend_contract_plan.md section 8 item 5).
+    """
+    return {"model": ErrorEnvelope, "description": description}
+
+
+# Reused by every gated router — require_api_key can 401 any route it guards.
+UNAUTHORIZED_RESPONSE = {
+    401: error_response("UNAUTHORIZED — missing or invalid X-API-Key.")
+}
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     """Register all intake-route exception handlers on `app`. Called once from create_app()."""
 
