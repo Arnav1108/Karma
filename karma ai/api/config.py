@@ -15,6 +15,10 @@ class Settings:
     locked_session_ttl_h: int
     build_result_ttl_h: int
     max_job_records: int
+    rate_limit_enabled: bool
+    rl_session_create_per_min: int
+    rl_intake_turn_per_min: int
+    rl_build_create_per_hour: int
 
 
 def _parse_api_keys(raw: str) -> frozenset[str]:
@@ -23,6 +27,10 @@ def _parse_api_keys(raw: str) -> frozenset[str]:
 
 def _parse_cors_origins(raw: str) -> tuple[str, ...]:
     return tuple(origin.strip() for origin in raw.split(",") if origin.strip())
+
+
+def _parse_bool(raw: str) -> bool:
+    return raw.strip().lower() not in ("false", "0", "no", "off", "")
 
 
 @lru_cache
@@ -48,4 +56,11 @@ def get_settings() -> Settings:
         locked_session_ttl_h=int(os.environ.get("KARMA_LOCKED_SESSION_TTL_H", "24")),
         build_result_ttl_h=int(os.environ.get("KARMA_BUILD_RESULT_TTL_H", "24")),
         max_job_records=int(os.environ.get("KARMA_MAX_JOB_RECORDS", "500")),
+        # See docs/hardening_plan.md section 2. Disabling makes rate_limit()'s
+        # dependency a genuine no-op (api/rate_limit.py) - useful for load
+        # tests and local dev.
+        rate_limit_enabled=_parse_bool(os.environ.get("KARMA_RATE_LIMIT_ENABLED", "true")),
+        rl_session_create_per_min=int(os.environ.get("KARMA_RL_SESSION_CREATE_PER_MIN", "5")),
+        rl_intake_turn_per_min=int(os.environ.get("KARMA_RL_INTAKE_TURN_PER_MIN", "20")),
+        rl_build_create_per_hour=int(os.environ.get("KARMA_RL_BUILD_CREATE_PER_HOUR", "3")),
     )

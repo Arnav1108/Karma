@@ -33,6 +33,7 @@ from api.dtos import (
 )
 from api.main import get_intake_service
 from api.mappers import map_brief_summary, map_progress, map_question
+from api.rate_limit import rate_limit
 from api.services.intake_service import IntakeService
 
 router = APIRouter(prefix="/intake")
@@ -67,7 +68,10 @@ def _reconstruct_question(state: IntakeSessionState) -> QuestionDTO | None:
 
 
 @router.post(
-    "/sessions", response_model=CreateSessionResponse, status_code=status.HTTP_201_CREATED
+    "/sessions",
+    response_model=CreateSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("session_create"))],
 )
 async def create_session(
     body: CreateSessionRequest,
@@ -84,7 +88,10 @@ async def create_session(
     )
 
 
-@router.post("/sessions/{session_id}/answers")
+@router.post(
+    "/sessions/{session_id}/answers",
+    dependencies=[Depends(rate_limit("intake_turn"))],
+)
 async def submit_answer(
     session_id: str,
     body: SubmitAnswerRequest,

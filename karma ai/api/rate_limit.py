@@ -8,9 +8,8 @@ an in-memory dict - see hardening_plan.md §7 item 7).
 Uses time.monotonic(), never datetime/wall-clock, so the window is immune
 to wall-clock adjustment (NTP step, DST, manual clock changes).
 
-This module intentionally has no FastAPI route/dependency wiring - it is
-a standalone limiter. Wiring (a dependency factory bound per-route) is a
-separate, later step.
+Also defines rate_limit(category), the FastAPI dependency factory that
+attaches a RateLimiter category to a route (see bottom of this file).
 """
 
 from __future__ import annotations
@@ -19,6 +18,10 @@ import asyncio
 import math
 import time
 from collections import deque
+
+from fastapi import Depends, Request
+
+from api.middleware import _api_key_header
 
 
 class RateLimitError(Exception):
@@ -100,3 +103,35 @@ class RateLimiter:
         cutoff = now - window_seconds
         while hits and hits[0] < cutoff:
             hits.popleft()
+
+
+def rate_limit(category: str):
+    """FastAPI dependency factory: returns a dependency bound to `category`.
+
+    Attach per-route so each endpoint enforces its own tier, e.g.
+        dependencies=[Depends(rate_limit("session_create"))]
+
+    Reuses middleware's shared _api_key_header instance so the limiter and
+    require_api_key parse the X-API-Key header exactly once, from one source
+    (hardening_plan.md section 2). Buckets by API key when one was sent;
+    falls back to the caller's IP only when no key was sent (e.g. auth
+    disabled) - see hardening_plan.md section 7 item 8.
+
+    When KARMA_RATE_LIMIT_ENABLED is false, the returned dependency is a
+    genuine no-op: it returns before touching the limiter at all, rather
+    than checking against an always-true condition.
+    """
+
+    async def _dep(
+        request: Request,
+        api_key: str | None = Depends(_api_key_header),
+    ) -> None:
+        settings = request.app.state.settings
+        if not settings.rate_limit_enabled:
+            return
+        limiter = request.app.state.rate_limiter
+        bucket = api_key or f"ip:{request.client.host}"
+        if not await limiter.allow(bucket, category):
+            raise RateLimitError(retry_after=await limiter.retry_after(bucket, category))
+
+    return _dep

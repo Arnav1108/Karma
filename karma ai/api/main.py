@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from agents.db.postgres import PostgresClient
 from api.config import get_settings
 from api.errors import register_exception_handlers
+from api.rate_limit import RateLimiter
 from api.routers import health
 from api.services.build_service import BuildService
 from api.services.intake_service import IntakeService
@@ -71,6 +72,15 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+    # Constructed once, shared by every rate_limit(category) dependency via
+    # request.app.state.rate_limiter (docs/hardening_plan.md section 2).
+    app.state.rate_limiter = RateLimiter(
+        {
+            "session_create": (settings.rl_session_create_per_min, 60),
+            "intake_turn": (settings.rl_intake_turn_per_min, 60),
+            "build_create": (settings.rl_build_create_per_hour, 3600),
+        }
     )
     # Constructed once and shared between IntakeService and BuildService --
     # BuildService.start_build reads the locked brief straight out of the
