@@ -5,12 +5,17 @@ from agents.db.postgres import PostgresClient
 from api.config import get_settings
 from api.errors import register_exception_handlers
 from api.routers import health
+from api.services.build_service import BuildService
 from api.services.intake_service import IntakeService
 from api.services.session_store import InMemorySessionStore
 
 
 def get_intake_service(request: Request) -> IntakeService:
     return request.app.state.intake_service
+
+
+def get_build_service(request: Request) -> BuildService:
+    return request.app.state.build_service
 
 
 def create_app() -> FastAPI:
