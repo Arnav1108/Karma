@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "SESSION_ALREADY_LOCKED",
+    "message": "Session is already locked.",
+    "retryable": false
+  }
+}

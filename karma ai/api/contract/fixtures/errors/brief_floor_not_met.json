@@ -1,0 +1,12 @@
+{
+  "error": {
+    "code": "BRIEF_FLOOR_NOT_MET",
+    "message": "Budget and/or primary use case must be answered before locking.",
+    "retryable": false,
+    "details": {
+      "missing": [
+        "budget"
+      ]
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "build_id": "b1d0c0de-0000-4b00-8000-000000000002",
+  "status": "infeasible",
+  "verdict": {
+    "verdict": "impossible",
+    "reason": "The cheapest compatible GPU meeting the VRAM floor already exceeds the ceiling.",
+    "binding_constraint": "gpu",
+    "suggested_adjustments": [
+      "Raise the budget ceiling to at least ₹75,000, or",
+      "Drop the 12GB VRAM requirement to 8GB."
+    ]
+  }
+}

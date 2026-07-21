@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "LLM_UPSTREAM_ERROR",
+    "message": "The upstream language model call failed. Please retry.",
+    "retryable": true
+  }
+}

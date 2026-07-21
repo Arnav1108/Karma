@@ -1,0 +1,45 @@
+{
+  "build_id": "b1d0c0de-0000-4b00-8000-000000000002",
+  "status": "succeeded",
+  "verdict": {
+    "verdict": "tight",
+    "reason": "Feasible, but the GPU floor consumes most of the budget headroom.",
+    "binding_constraint": "gpu",
+    "suggested_adjustments": [
+      "Raise the ceiling by ~₹5,000 for a 12GB GPU."
+    ]
+  },
+  "build": {
+    "parts": [
+      {
+        "slot": "gpu",
+        "product_id": "GPU-4060-ASUS",
+        "name": "ASUS Dual GeForce RTX 4060 8GB",
+        "brand": "ASUS",
+        "price_inr": 30500,
+        "justification": "Cheapest in-stock 8GB card clearing the 1080p/144fps target."
+      },
+      {
+        "slot": "cpu",
+        "product_id": "CPU-7500F",
+        "name": "AMD Ryzen 5 7500F",
+        "brand": "AMD",
+        "price_inr": 17000,
+        "justification": "6c/12t, pairs with the AM5 board without bottlenecking the GPU."
+      },
+      {
+        "slot": "motherboard",
+        "product_id": "MB-B650M-PG",
+        "name": "ASRock B650M-HDV/M.2",
+        "brand": "ASRock",
+        "price_inr": 11500,
+        "justification": "Cheapest in-stock AM5 microATX board with DDR5 + NVMe."
+      }
+    ],
+    "total_price_inr": 59000,
+    "summary": "A tight 1080p/144fps competitive-gaming build on AM5 with room to upgrade.",
+    "warnings": [
+      "No compatible in-stock cooler under the ceiling — using the boxed AMD cooler."
+    ]
+  }
+}

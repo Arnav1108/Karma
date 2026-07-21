@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "INTERNAL_ERROR",
+    "message": "An internal error occurred.",
+    "retryable": false
+  }
+}

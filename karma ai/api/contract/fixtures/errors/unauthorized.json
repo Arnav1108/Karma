@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "UNAUTHORIZED",
+    "message": "Invalid or missing API key.",
+    "retryable": false
+  }
+}

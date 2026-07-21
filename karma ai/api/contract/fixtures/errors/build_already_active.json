@@ -1,0 +1,10 @@
+{
+  "error": {
+    "code": "BUILD_ALREADY_ACTIVE",
+    "message": "A build is already active for this session.",
+    "retryable": false,
+    "details": {
+      "build_id": "b1d0c0de-0000-4b00-8000-000000000002"
+    }
+  }
+}

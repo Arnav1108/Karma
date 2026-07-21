@@ -1,0 +1,5 @@
+{
+  "build_id": "b1d0c0de-0000-4b00-8000-000000000002",
+  "status": "cannot_proceed",
+  "reason": "Postgres was unreachable mid-run; no parts could be selected."
+}

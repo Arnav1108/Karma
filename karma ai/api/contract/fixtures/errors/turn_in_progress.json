@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "TURN_IN_PROGRESS",
+    "message": "A turn is already in progress for this session. Retry shortly.",
+    "retryable": true
+  }
+}
