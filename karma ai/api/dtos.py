@@ -142,6 +142,53 @@ class LockResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Build route DTOs — see karma ai/docs/build_service_plan.md section 7.
+# ---------------------------------------------------------------------------
+
+class StartBuildRequest(BaseModel):
+    session_id: str
+
+
+class BuildAcceptedDTO(BaseModel):
+    build_id: str
+    status: Literal["queued"]
+    poll_after_ms: int = 2000
+
+
+class VerdictDTO(BaseModel):
+    verdict: Literal["comfortable", "tight", "impossible"]
+    reason: str
+    binding_constraint: str | None = None
+    suggested_adjustments: list[str] = []
+
+
+class BuildPartDTO(BaseModel):
+    slot: str
+    product_id: str
+    name: str
+    brand: str | None = None
+    price_inr: int
+    justification: str
+
+
+class BuildCardDTO(BaseModel):
+    parts: list[BuildPartDTO]
+    total_price_inr: int
+    summary: str
+    warnings: list[str] = []
+
+
+class BuildStatusResponse(BaseModel):
+    build_id: str
+    status: Literal["queued", "running", "succeeded", "infeasible", "cannot_proceed", "failed"]
+    poll_after_ms: int | None = None
+    verdict: VerdictDTO | None = None
+    build: BuildCardDTO | None = None
+    error: ErrorBody | None = None
+    reason: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # Error envelope
 # ---------------------------------------------------------------------------
 
