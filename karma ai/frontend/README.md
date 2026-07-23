@@ -44,6 +44,19 @@ will block every request until it's configured.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Fixture stub server
+
+`npm run fixture-server` starts a dependency-free HTTP stub (`scripts/fixture-server.mjs`)
+on `http://localhost:8001` that serves the committed contract fixtures from
+`karma ai/api/contract/fixtures/**`, with the same CORS headers, HTTP status codes, and
+`Retry-After` headers the real API would send. Use it to render error and terminal-build
+states that are impractical or impossible to trigger against the live backend — e.g.
+`cannot_proceed`, `failed` (both retryable and non-retryable), the 502/503/500 family, and
+the floor-gated `BRIEF_FLOOR_NOT_MET` / `BRIEF_NOT_LOCKED` errors. Pick a scenario with a
+query param, e.g. `http://localhost:8001/?scenario=cannot_proceed`; `GET /` with no
+`scenario` lists every available name. It's a standing dev tool (not deleted after any one
+phase), so it stays in sync automatically — fixtures are read fresh from disk per request.
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
