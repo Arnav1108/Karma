@@ -1,0 +1,15 @@
+{
+  "session_id": "3f9a1c2e-0000-4a00-8000-000000000001",
+  "status": "asking",
+  "question": {
+    "question_id": "budget",
+    "text": "Roughly what budget are you working with for this build?",
+    "kind": "sequence"
+  },
+  "progress": {
+    "answered": 0,
+    "total": 13,
+    "floor_met": false
+  },
+  "expires_at": "2026-07-21T12:30:00Z"
+}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "BUILD_NOT_FOUND",
+    "message": "Build not found or has expired.",
+    "retryable": false
+  }
+}

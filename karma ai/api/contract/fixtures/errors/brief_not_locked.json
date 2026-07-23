@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "BRIEF_NOT_LOCKED",
+    "message": "The session's brief is not locked yet; it cannot be built.",
+    "retryable": false
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "DATABASE_UNAVAILABLE",
+    "message": "Failed to persist the locked brief. Please retry.",
+    "retryable": true
+  }
+}

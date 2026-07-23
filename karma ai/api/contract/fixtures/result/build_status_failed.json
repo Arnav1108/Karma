@@ -1,0 +1,9 @@
+{
+  "build_id": "b1d0c0de-0000-4b00-8000-000000000002",
+  "status": "failed",
+  "error": {
+    "code": "BUILD_TIMEOUT",
+    "message": "The build exceeded its time budget. Please retry.",
+    "retryable": true
+  }
+}

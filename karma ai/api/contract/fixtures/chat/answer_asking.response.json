@@ -1,0 +1,14 @@
+{
+  "status": "asking",
+  "question": {
+    "question_id": "performance",
+    "text": "What resolution and frame rate are you aiming for?",
+    "kind": "sequence"
+  },
+  "progress": {
+    "answered": 1,
+    "total": 13,
+    "floor_met": true
+  },
+  "expires_at": "2026-07-21T12:30:00Z"
+}

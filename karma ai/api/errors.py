@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 
 from api.config import get_settings
 from api.dtos import ErrorBody, ErrorEnvelope
+from api.middleware import UnauthorizedError
 from api.rate_limit import RateLimitError
 from api.services.exceptions import (
     BriefFloorNotMetError,
@@ -54,6 +55,29 @@ def _envelope(code: str, message: str, retryable: bool, details: dict | None = N
         error=ErrorBody(code=code, message=message, retryable=retryable, details=details)
     )
     return envelope.model_dump(exclude_none=True)
+
+
+def error_response(description: str) -> dict:
+    """Build an OpenAPI `responses` entry for an error-enveloped HTTP status.
+
+    FastAPI's automatic generation cannot infer the custom exception handlers'
+    response shapes, so the routers attach these explicitly (see
+    docs/frontend_contract_plan.md section 1.3). Every error body shares the
+    ErrorEnvelope model; because several error *codes* can map to one HTTP status
+    (e.g. 409 covers SESSION_ALREADY_LOCKED / TURN_IN_PROGRESS / BRIEF_FLOOR_NOT_MET),
+    the description enumerates the codes for that status.
+
+    Never add a 504 entry via this helper: no code path emits INTAKE_TURN_TIMEOUT
+    today, so documenting it would misrepresent the live contract
+    (frontend_contract_plan.md section 8 item 5).
+    """
+    return {"model": ErrorEnvelope, "description": description}
+
+
+# Reused by every gated router — require_api_key can 401 any route it guards.
+UNAUTHORIZED_RESPONSE = {
+    401: error_response("UNAUTHORIZED — missing or invalid X-API-Key.")
+}
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -224,6 +248,15 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=500,
             content=_envelope("INTERNAL_ERROR", "An internal error occurred.", False),
+        )
+
+    @app.exception_handler(UnauthorizedError)
+    async def _unauthorized(request: Request, exc: UnauthorizedError) -> JSONResponse:
+        # Normalized to the shared envelope (retryable=false) so the 401 body matches
+        # every other error's shape, rather than FastAPI's default {"detail": ...}.
+        return JSONResponse(
+            status_code=401,
+            content=_envelope("UNAUTHORIZED", "Invalid or missing API key.", False),
         )
 
     @app.exception_handler(RequestValidationError)

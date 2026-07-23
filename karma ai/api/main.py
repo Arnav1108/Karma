@@ -71,7 +71,18 @@ def create_app() -> FastAPI:
     # rare path where create_app() is invoked more than once in one process.
     configure_logging()
     settings = get_settings()
-    app = FastAPI(title="Karma Advisor API", lifespan=_lifespan)
+    app = FastAPI(
+        title="Karma Advisor API",
+        description=(
+            "HTTP layer over the Karma Advisor LangGraph pipeline — conversational "
+            "intake, feasibility, budget allocation, and part selection. The frozen "
+            "frontend contract (DTOs, error catalog, per-screen fixtures) is documented "
+            "in docs/frontend_contract_plan.md."
+        ),
+        version=settings.version,
+        contact={"name": "Karma Computers"},
+        lifespan=_lifespan,
+    )
     app.state.settings = settings
     register_exception_handlers(app)
     # Empty KARMA_CORS_ORIGINS => empty allow list => browsers block all
@@ -137,7 +148,7 @@ def create_app() -> FastAPI:
     )
 
     # Health endpoints (/healthz, /readyz) are liveness/readiness probes — never gated.
-    app.include_router(health.router)
+    app.include_router(health.router, tags=["health"])
     # Deferred (function-scoped) imports: api.routers.intake/builds import
     # get_intake_service/get_build_service back from this module, which isn't
     # set on api.main until this point in its own top-to-bottom execution —
@@ -147,8 +158,18 @@ def create_app() -> FastAPI:
     # fully initialized, so the deferred import resolves cleanly.
     from api.middleware import require_api_key
     from api.routers import builds, intake
-    app.include_router(intake.router, prefix="/api/v1", dependencies=[Depends(require_api_key)])
-    app.include_router(builds.router, prefix="/api/v1", dependencies=[Depends(require_api_key)])
+    app.include_router(
+        intake.router,
+        prefix="/api/v1",
+        tags=["intake"],
+        dependencies=[Depends(require_api_key)],
+    )
+    app.include_router(
+        builds.router,
+        prefix="/api/v1",
+        tags=["builds"],
+        dependencies=[Depends(require_api_key)],
+    )
 
     return app
 

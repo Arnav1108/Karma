@@ -1,0 +1,14 @@
+{
+  "status": "asking",
+  "question": {
+    "question_id": "operating_system",
+    "text": "I'll assume Windows 11 unless you'd prefer Linux — is Windows fine?",
+    "kind": "confirm_default"
+  },
+  "progress": {
+    "answered": 7,
+    "total": 13,
+    "floor_met": true
+  },
+  "expires_at": "2026-07-21T12:30:00Z"
+}

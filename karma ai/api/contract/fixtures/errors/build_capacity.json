@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "BUILD_CAPACITY",
+    "message": "The build service is at capacity. Please retry shortly.",
+    "retryable": true
+  }
+}

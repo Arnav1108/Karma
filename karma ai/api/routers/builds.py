@@ -24,6 +24,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, status
 
 from api.dtos import BuildAcceptedDTO, BuildStatusResponse, StartBuildRequest
+from api.errors import UNAUTHORIZED_RESPONSE, error_response
 from api.main import get_build_service
 from api.mappers import map_build_status
 from api.rate_limit import rate_limit
@@ -37,6 +38,16 @@ router = APIRouter(prefix="/builds")
     response_model=BuildAcceptedDTO,
     status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(rate_limit("build_create"))],
+    responses={
+        **UNAUTHORIZED_RESPONSE,
+        404: error_response("SESSION_NOT_FOUND — unknown or expired session."),
+        409: error_response("BRIEF_NOT_LOCKED — the session's brief is not locked yet."),
+        422: error_response("VALIDATION_ERROR — request body failed validation."),
+        429: error_response(
+            "BUILD_CAPACITY (at max concurrent builds) or RATE_LIMITED "
+            "(build-create quota exceeded); both set Retry-After."
+        ),
+    },
 )
 async def start_build(
     body: StartBuildRequest,
@@ -46,7 +57,14 @@ async def start_build(
     return BuildAcceptedDTO(build_id=build_id, status="queued", poll_after_ms=2000)
 
 
-@router.get("/{build_id}", response_model=BuildStatusResponse)
+@router.get(
+    "/{build_id}",
+    response_model=BuildStatusResponse,
+    responses={
+        **UNAUTHORIZED_RESPONSE,
+        404: error_response("BUILD_NOT_FOUND — unknown or evicted build id."),
+    },
+)
 async def get_build(
     build_id: str,
     service: BuildService = Depends(get_build_service),

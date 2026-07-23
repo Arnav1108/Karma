@@ -1,0 +1,121 @@
+{
+  "status": "locked",
+  "brief_summary": {
+    "answered_fields": [
+      "budget",
+      "primary_use_case",
+      "software",
+      "performance",
+      "monitor",
+      "peripherals",
+      "storage",
+      "operating_system",
+      "existing",
+      "physical",
+      "longevity",
+      "extras",
+      "hard_constraints"
+    ],
+    "completeness": {
+      "required_complete": true,
+      "optional_filled": 3,
+      "optional_skipped": 0
+    },
+    "budget": {
+      "comfortable_min": 60000,
+      "comfortable_max": 65000,
+      "ceiling": 70000,
+      "scope": "pc_only",
+      "currency": "INR",
+      "notes": null
+    },
+    "purpose": {
+      "primary_use_case": "gaming",
+      "sub_case": "competitive_fps",
+      "secondary_use_cases": []
+    },
+    "software": [
+      {
+        "name": "Valorant",
+        "category": "game",
+        "frequency": "primary",
+        "intensity": "casual"
+      },
+      {
+        "name": "CS2",
+        "category": "game",
+        "frequency": "primary",
+        "intensity": "casual"
+      },
+      {
+        "name": "GTA V",
+        "category": "game",
+        "frequency": "secondary",
+        "intensity": "moderate"
+      }
+    ],
+    "performance": {
+      "target_resolution": "1080p",
+      "target_framerate": 144,
+      "hdr_wanted": false,
+      "source": "user_stated"
+    },
+    "monitor": {
+      "owned": "yes",
+      "specs": "1080p @ 144Hz",
+      "count": 1,
+      "source": "user_stated"
+    },
+    "peripherals": [
+      {
+        "type": "keyboard",
+        "requirements": "mechanical switches",
+        "priority": "nice_to_have"
+      },
+      {
+        "type": "mouse",
+        "requirements": "lightweight, high polling rate",
+        "priority": "nice_to_have"
+      }
+    ],
+    "storage": {
+      "capacity_gb": 512,
+      "speed_tier": "nvme",
+      "data_profile": "hot",
+      "source": "inferred"
+    },
+    "operating_system": {
+      "os": "windows",
+      "license": "oem",
+      "source": "default_applied"
+    },
+    "reuse_parts": [],
+    "brand_prefs": {
+      "cpu": null,
+      "gpu": null
+    },
+    "physical": {
+      "form_factor_pref": "atx_mid",
+      "noise_tolerance": "balanced",
+      "placement": "open_desk",
+      "portability_need": false
+    },
+    "longevity": {
+      "reliability_priority": "consumer",
+      "upgrade_path": "balanced",
+      "timeline": "buy_now"
+    },
+    "extras": {
+      "rgb_pref": "minimal",
+      "visual_style": "no_preference",
+      "connectivity_needs": [
+        "wifi"
+      ],
+      "specific_part_requests": []
+    },
+    "hard_constraints": {
+      "must_have": [],
+      "must_not": []
+    }
+  }
+}

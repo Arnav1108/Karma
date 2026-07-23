@@ -1,0 +1,267 @@
+[
+  {
+    "request": {
+      "client_ref": "web-demo"
+    },
+    "response": {
+      "session_id": "3f9a1c2e-0000-4a00-8000-000000000001",
+      "status": "asking",
+      "question": {
+        "question_id": "budget",
+        "text": "Roughly what budget are you working with?",
+        "kind": "sequence"
+      },
+      "progress": {
+        "answered": 0,
+        "total": 13,
+        "floor_met": false
+      },
+      "expires_at": "2026-07-21T12:30:00Z"
+    }
+  },
+  {
+    "request": {
+      "answer": "My comfortable budget is 85,000 to 95,000 rupees, with an absolute ceiling of 100,000 rupees. This is just for the PC — I already own a 1080p 144Hz monitor, plus a keyboard and mouse, so none of those are needed."
+    },
+    "response": {
+      "status": "asking",
+      "question": {
+        "question_id": "primary_use_case",
+        "text": "(next) tell me about your primary use case.",
+        "kind": "sequence"
+      },
+      "progress": {
+        "answered": 1,
+        "total": 13,
+        "floor_met": true
+      },
+      "expires_at": "2026-07-21T12:30:00Z"
+    }
+  },
+  {
+    "request": {
+      "answer": "This is primarily for gaming — mostly competitive shooters, and I want high, stable frame rates."
+    },
+    "response": {
+      "status": "asking",
+      "question": {
+        "question_id": "software",
+        "text": "(next) tell me about your software.",
+        "kind": "sequence"
+      },
+      "progress": {
+        "answered": 2,
+        "total": 13,
+        "floor_met": true
+      },
+      "expires_at": "2026-07-21T12:30:00Z"
+    }
+  },
+  {
+    "request": {
+      "answer": "I mainly play Valorant and CS2, and sometimes GTA V."
+    },
+    "response": {
+      "status": "asking",
+      "question": {
+        "question_id": "performance",
+        "text": "(next) tell me about your performance.",
+        "kind": "sequence"
+      },
+      "progress": {
+        "answered": 3,
+        "total": 13,
+        "floor_met": true
+      },
+      "expires_at": "2026-07-21T12:30:00Z"
+    }
+  },
+  {
+    "request": {
+      "answer": "I'm targeting 1080p at 144fps or higher. HDR isn't important to me."
+    },
+    "response": {
+      "status": "asking",
+      "question": {
+        "question_id": "monitor",
+        "text": "(next) tell me about your monitor.",
+        "kind": "sequence"
+      },
+      "progress": {
+        "answered": 4,
+        "total": 13,
+        "floor_met": true
+      },
+      "expires_at": "2026-07-21T12:30:00Z"
+    }
+  },
+  {
+    "request": {
+      "answer": "I already have a 1080p 144Hz monitor with no HDR — I don't need a new one."
+    },
+    "response": {
+      "status": "asking",
+      "question": {
+        "question_id": "peripherals",
+        "text": "(next) tell me about your peripherals.",
+        "kind": "sequence"
+      },
+      "progress": {
+        "answered": 5,
+        "total": 13,
+        "floor_met": true
+      },
+      "expires_at": "2026-07-21T12:30:00Z"
+    }
+  },
+  {
+    "request": {
+      "answer": "I already have a keyboard and mouse I'm happy with — nothing needed there."
+    },
+    "response": {
+      "status": "asking",
+      "question": {
+        "question_id": "storage",
+        "text": "(next) tell me about your storage.",
+        "kind": "sequence"
+      },
+      "progress": {
+        "answered": 6,
+        "total": 13,
+        "floor_met": true
+      },
+      "expires_at": "2026-07-21T12:30:00Z"
+    }
+  },
+  {
+    "request": {
+      "answer": "Around 512GB of fast NVMe storage is enough, mostly for games."
+    },
+    "response": {
+      "status": "locked",
+      "brief_summary": {
+        "answered_fields": [
+          "budget",
+          "primary_use_case",
+          "software",
+          "performance",
+          "monitor",
+          "peripherals",
+          "storage",
+          "operating_system",
+          "existing",
+          "physical",
+          "longevity",
+          "extras",
+          "hard_constraints"
+        ],
+        "completeness": {
+          "required_complete": true,
+          "optional_filled": 3,
+          "optional_skipped": 0
+        },
+        "budget": {
+          "comfortable_min": 60000,
+          "comfortable_max": 65000,
+          "ceiling": 70000,
+          "scope": "pc_only",
+          "currency": "INR",
+          "notes": null
+        },
+        "purpose": {
+          "primary_use_case": "gaming",
+          "sub_case": "competitive_fps",
+          "secondary_use_cases": []
+        },
+        "software": [
+          {
+            "name": "Valorant",
+            "category": "game",
+            "frequency": "primary",
+            "intensity": "casual"
+          },
+          {
+            "name": "CS2",
+            "category": "game",
+            "frequency": "primary",
+            "intensity": "casual"
+          },
+          {
+            "name": "GTA V",
+            "category": "game",
+            "frequency": "secondary",
+            "intensity": "moderate"
+          }
+        ],
+        "performance": {
+          "target_resolution": "1080p",
+          "target_framerate": 144,
+          "hdr_wanted": false,
+          "source": "user_stated"
+        },
+        "monitor": {
+          "owned": "yes",
+          "specs": "1080p @ 144Hz",
+          "count": 1,
+          "source": "user_stated"
+        },
+        "peripherals": [
+          {
+            "type": "keyboard",
+            "requirements": "mechanical switches",
+            "priority": "nice_to_have"
+          },
+          {
+            "type": "mouse",
+            "requirements": "lightweight, high polling rate",
+            "priority": "nice_to_have"
+          }
+        ],
+        "storage": {
+          "capacity_gb": 512,
+          "speed_tier": "nvme",
+          "data_profile": "hot",
+          "source": "inferred"
+        },
+        "operating_system": {
+          "os": "windows",
+          "license": "oem",
+          "source": "default_applied"
+        },
+        "reuse_parts": [],
+        "brand_prefs": {
+          "cpu": null,
+          "gpu": null
+        },
+        "physical": {
+          "form_factor_pref": "atx_mid",
+          "noise_tolerance": "balanced",
+          "placement": "open_desk",
+          "portability_need": false
+        },
+        "longevity": {
+          "reliability_priority": "consumer",
+          "upgrade_path": "balanced",
+          "timeline": "buy_now"
+        },
+        "extras": {
+          "rgb_pref": "minimal",
+          "visual_style": "no_preference",
+          "connectivity_needs": [
+            "wifi"
+          ],
+          "specific_part_requests": []
+        },
+        "hard_constraints": {
+          "must_have": [],
+          "must_not": []
+        }
+      },
+      "progress": {
+        "answered": 13,
+        "total": 13,
+        "floor_met": true
+      }
+    }
+  }
+]
