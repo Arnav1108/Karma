@@ -23,6 +23,29 @@ export function ResultScreen({
   return (
     <div className="flex-1 flex justify-center px-6 py-16 pb-24">
       <div className="w-full max-w-[720px] animate-fade-in">
+        {status.status === "succeeded" && !status.build ? (
+          <div className="text-center py-16 flex flex-col gap-5 items-center">
+            <div className="font-serif italic text-[20px] text-foreground/90">
+              Your build finished, but we couldn&apos;t load the part list. Try again or start a new build.
+            </div>
+            <div className="flex items-center gap-4">
+              <button
+                onClick={onRetry}
+                disabled={submitting}
+                className="px-8 py-3.5 rounded-lg bg-accent text-ink font-semibold text-[13px] cursor-pointer hover:bg-accent-hover transition-colors disabled:opacity-50"
+              >
+                {submitting ? "Retrying…" : "Retry"}
+              </button>
+              <button
+                onClick={onStartOver}
+                className="text-[13px] text-faint hover:text-muted cursor-pointer"
+              >
+                Start over
+              </button>
+            </div>
+          </div>
+        ) : null}
+
         {status.status === "succeeded" && status.build ? (
           <>
             <h2 className="font-serif italic font-medium text-[30px] text-foreground mb-8">
@@ -69,6 +92,20 @@ export function ResultScreen({
               Start a new build
             </button>
           </>
+        ) : null}
+
+        {status.status === "infeasible" && !status.verdict ? (
+          <div className="text-center py-16 flex flex-col gap-5 items-center">
+            <div className="font-serif italic text-[20px] text-foreground/90">
+              This build wasn&apos;t feasible within your budget, but we don&apos;t have details on why. Start over with a new brief.
+            </div>
+            <button
+              onClick={onStartOver}
+              className="px-6 py-3 rounded-lg bg-accent text-ink font-semibold text-[13px] cursor-pointer hover:bg-accent-hover transition-colors"
+            >
+              Start over with a new brief
+            </button>
+          </div>
         ) : null}
 
         {status.status === "infeasible" && status.verdict ? (

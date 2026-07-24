@@ -23,6 +23,11 @@ type Screen = "start" | "intake" | "review" | "generating" | "result";
 
 const TERMINAL_BUILD_STATUSES = new Set(["succeeded", "infeasible", "cannot_proceed", "failed"]);
 
+// Consecutive getBuildStatus failures tolerated before polling gives up and
+// surfaces a retryable error, rather than failing (or spinning) silently.
+const MAX_POLL_ERROR_ATTEMPTS = 3;
+const POLL_BACKOFF_MS = [2000, 4000, 8000];
+
 function friendlyError(err: unknown): { message: string; retryable: boolean } {
   if (err instanceof ApiError) {
     return { message: err.message, retryable: err.retryable };
@@ -48,6 +53,8 @@ export function KarmaAdvisorApp() {
 
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollBuildRef = useRef<(id: string, delayMs: number) => void>(() => {});
+  const pollErrorCountRef = useRef(0);
+  const lastActionRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     pollBuildRef.current = (id: string, delayMs: number) => {
@@ -55,6 +62,7 @@ export function KarmaAdvisorApp() {
       pollTimer.current = setTimeout(async () => {
         try {
           const status = await getBuildStatus(id);
+          pollErrorCountRef.current = 0;
           if (TERMINAL_BUILD_STATUSES.has(status.status)) {
             setBuildStatus(status);
             setScreen("result");
@@ -62,7 +70,19 @@ export function KarmaAdvisorApp() {
             pollBuildRef.current(id, status.poll_after_ms ?? 2000);
           }
         } catch (err) {
-          setError(friendlyError(err));
+          pollErrorCountRef.current += 1;
+          if (pollErrorCountRef.current < MAX_POLL_ERROR_ATTEMPTS) {
+            const backoffMs =
+              POLL_BACKOFF_MS[pollErrorCountRef.current - 1] ??
+              POLL_BACKOFF_MS[POLL_BACKOFF_MS.length - 1];
+            pollBuildRef.current(id, backoffMs);
+          } else {
+            lastActionRef.current = () => {
+              pollErrorCountRef.current = 0;
+              pollBuildRef.current(id, 2000);
+            };
+            setError(friendlyError(err));
+          }
         }
       }, delayMs);
     };
@@ -89,6 +109,7 @@ export function KarmaAdvisorApp() {
       setTranscript([]);
       setScreen("intake");
     } catch (err) {
+      lastActionRef.current = () => handleBegin();
       setError(friendlyError(err));
     } finally {
       setSubmitting(false);
@@ -110,6 +131,7 @@ export function KarmaAdvisorApp() {
         setProgress(res.progress);
       }
     } catch (err) {
+      lastActionRef.current = () => handleAnswer(answer);
       setError(friendlyError(err));
     } finally {
       setSubmitting(false);
@@ -125,6 +147,7 @@ export function KarmaAdvisorApp() {
       setBriefSummary(res.brief_summary);
       setScreen("review");
     } catch (err) {
+      lastActionRef.current = () => handleFinishEarly();
       setError(friendlyError(err));
     } finally {
       setSubmitting(false);
@@ -151,6 +174,7 @@ export function KarmaAdvisorApp() {
           return;
         }
       }
+      lastActionRef.current = () => handleGenerate();
       setError(friendlyError(err));
     } finally {
       setSubmitting(false);
@@ -167,6 +191,7 @@ export function KarmaAdvisorApp() {
       setScreen("generating");
       pollBuild(res.build_id, res.poll_after_ms);
     } catch (err) {
+      lastActionRef.current = () => handleRetryBuild();
       setError(friendlyError(err));
     } finally {
       setSubmitting(false);
@@ -176,6 +201,7 @@ export function KarmaAdvisorApp() {
   function handleStartOver() {
     if (sessionId) abandonSession(sessionId);
     if (pollTimer.current) clearTimeout(pollTimer.current);
+    lastActionRef.current = null;
     setSessionId(null);
     setQuestion(null);
     setProgress(null);
@@ -184,6 +210,18 @@ export function KarmaAdvisorApp() {
     setBuildStatus(null);
     setError(null);
     setScreen("start");
+  }
+
+  function handleErrorRetry() {
+    const retry = lastActionRef.current;
+    lastActionRef.current = null;
+    setError(null);
+    retry?.();
+  }
+
+  function handleErrorDismiss() {
+    lastActionRef.current = null;
+    setError(null);
   }
 
   const step: Step | null =
@@ -200,7 +238,9 @@ export function KarmaAdvisorApp() {
           <ErrorBanner
             message={error.message}
             retryable={error.retryable}
-            onDismiss={() => setError(null)}
+            onRetry={lastActionRef.current ? handleErrorRetry : undefined}
+            onDismiss={handleErrorDismiss}
+            onStartOver={screen === "generating" ? handleStartOver : undefined}
           />
         </div>
       ) : null}
