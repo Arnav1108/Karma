@@ -28,9 +28,9 @@ const TERMINAL_BUILD_STATUSES = new Set(["succeeded", "infeasible", "cannot_proc
 const MAX_POLL_ERROR_ATTEMPTS = 3;
 const POLL_BACKOFF_MS = [2000, 4000, 8000];
 
-function friendlyError(err: unknown): { message: string; retryable: boolean } {
+function friendlyError(err: unknown): { message: string; retryable: boolean; code?: string } {
   if (err instanceof ApiError) {
-    return { message: err.message, retryable: err.retryable };
+    return { message: err.message, retryable: err.retryable, code: err.code };
   }
   return {
     message: "Couldn't reach the Karma Advisor service. Check your connection and try again.",
@@ -41,7 +41,9 @@ function friendlyError(err: unknown): { message: string; retryable: boolean } {
 export function KarmaAdvisorApp() {
   const [screen, setScreen] = useState<Screen>("start");
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<{ message: string; retryable: boolean } | null>(null);
+  const [error, setError] = useState<{ message: string; retryable: boolean; code?: string } | null>(
+    null
+  );
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [question, setQuestion] = useState<QuestionDTO | null>(null);
@@ -191,6 +193,18 @@ export function KarmaAdvisorApp() {
       setScreen("generating");
       pollBuild(res.build_id, res.poll_after_ms);
     } catch (err) {
+      // Mirrors handleGenerate's recovery: a build already active for this
+      // session is not a dead end — resume polling the existing build.
+      if (err instanceof ApiError && err.code === "BUILD_ALREADY_ACTIVE") {
+        const existingId = err.details?.build_id;
+        if (typeof existingId === "string") {
+          setBuildStatus(null);
+          setScreen("generating");
+          pollBuild(existingId, 2000);
+          setSubmitting(false);
+          return;
+        }
+      }
       lastActionRef.current = () => handleRetryBuild();
       setError(friendlyError(err));
     } finally {
@@ -240,7 +254,11 @@ export function KarmaAdvisorApp() {
             retryable={error.retryable}
             onRetry={lastActionRef.current ? handleErrorRetry : undefined}
             onDismiss={handleErrorDismiss}
-            onStartOver={screen === "generating" ? handleStartOver : undefined}
+            onStartOver={
+              screen === "generating" || error.code === "SESSION_NOT_FOUND"
+                ? handleStartOver
+                : undefined
+            }
           />
         </div>
       ) : null}

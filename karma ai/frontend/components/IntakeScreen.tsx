@@ -8,6 +8,12 @@ export interface TranscriptTurn {
   a: string;
 }
 
+// Mirrors SubmitAnswerRequest.answer's max_length=2000 (api/dtos.py) — capped
+// client-side so a long paste never round-trips to a raw 422.
+const MAX_ANSWER_LENGTH = 2000;
+const COUNTER_VISIBLE_THRESHOLD = MAX_ANSWER_LENGTH - 400;
+const COUNTER_WARNING_THRESHOLD = MAX_ANSWER_LENGTH - 100;
+
 export function IntakeScreen({
   transcript,
   question,
@@ -31,6 +37,9 @@ export function IntakeScreen({
     setDraft("");
     onAnswer(trimmed);
   }
+
+  const nearLimit = draft.length >= COUNTER_VISIBLE_THRESHOLD;
+  const atLimit = draft.length >= COUNTER_WARNING_THRESHOLD;
 
   return (
     <div className="flex-1 flex justify-center px-6 py-16 pb-24">
@@ -80,14 +89,24 @@ export function IntakeScreen({
               <input
                 autoFocus
                 value={draft}
-                onChange={(e) => setDraft(e.target.value)}
+                onChange={(e) => setDraft(e.target.value.slice(0, MAX_ANSWER_LENGTH))}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") submitDraft();
                 }}
                 disabled={submitting}
+                maxLength={MAX_ANSWER_LENGTH}
                 placeholder="Type your answer…"
                 className="w-full bg-transparent border-0 border-b border-line-strong focus:border-accent outline-none py-3 font-serif italic text-[18px] text-foreground placeholder:text-faint placeholder:not-italic transition-colors disabled:opacity-50"
               />
+              {nearLimit ? (
+                <div
+                  className={`text-[12px] -mt-2 ${atLimit ? "text-red-400" : "text-faint"}`}
+                >
+                  {atLimit
+                    ? `Answer will be cut off at ${MAX_ANSWER_LENGTH} characters (${draft.length}/${MAX_ANSWER_LENGTH})`
+                    : `${draft.length}/${MAX_ANSWER_LENGTH}`}
+                </div>
+              ) : null}
               <button
                 onClick={submitDraft}
                 disabled={submitting || !draft.trim()}
