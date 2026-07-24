@@ -304,13 +304,18 @@ test actually fails — proof the assertions are not vacuous.
 
 ## 7. Phase 6 — Production build + launch-readiness register
 
-**Status: not started. No deploy in v1** — hosting stays blocked behind constraints the
-backend docs already own.
+**Status: done (2026-07-24). No deploy in v1** — hosting stays blocked behind constraints
+the backend docs already own.
 
-Verify `npm run build` compiles (only `next dev` has ever run), `npx tsc --noEmit`, and
-`npm run lint`.
+Verified `npm run build` compiles (this was the first time anything but `next dev` had
+been exercised), `npx tsc --noEmit`, and `npm run lint`. All three are clean:
 
-Then write the gap register — documentation, no code:
+- `npm run build` — Turbopack production build, compiled successfully, TypeScript pass
+  finished with no errors, both routes (`/`, `/_not-found`) prerendered as static content.
+- `npx tsc --noEmit` — exit 0, no output.
+- `npm run lint` — exit 0, no output.
+
+### 7.1 Gap register
 
 - **⚠ Launch blocker — auth.** `NEXT_PUBLIC_API_KEY` is a static shared secret, and the
   `NEXT_PUBLIC_*` prefix means it is **inlined into the client bundle and readable by
@@ -327,7 +332,9 @@ Then write the gap register — documentation, no code:
 - **No error monitoring, no analytics**, and no `error.tsx` / `not-found.tsx` boundaries.
 - **`expires_at` unused** (defect 7) — a session-TTL warning is its natural home.
 
-**Checkpoint:** a clean production build, and the register reviewed as written.
+**Checkpoint:** a clean production build, and the register reviewed as written. Satisfied
+— see the three verification results above; no deployment or hosting config was attempted,
+per the "no deploy in v1" scope above.
 
 ---
 
