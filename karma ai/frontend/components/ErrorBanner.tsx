@@ -5,11 +5,13 @@ export function ErrorBanner({
   retryable,
   onRetry,
   onDismiss,
+  onStartOver,
 }: {
   message: string;
   retryable: boolean;
   onRetry?: () => void;
   onDismiss?: () => void;
+  onStartOver?: () => void;
 }) {
   return (
     <div className="w-full rounded-lg border border-line-strong bg-raised px-5 py-4 flex items-start justify-between gap-4 animate-fade-in">
@@ -21,6 +23,14 @@ export function ErrorBanner({
             className="text-[13px] font-medium text-accent hover:text-accent-hover cursor-pointer"
           >
             Try again
+          </button>
+        ) : null}
+        {!retryable && onStartOver ? (
+          <button
+            onClick={onStartOver}
+            className="text-[13px] font-medium text-accent hover:text-accent-hover cursor-pointer"
+          >
+            Start over
           </button>
         ) : null}
         {onDismiss ? (

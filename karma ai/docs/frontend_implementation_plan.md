@@ -64,7 +64,13 @@ handling.
    TTL-expires makes the build impossible despite a durable Postgres brief.
 8. **[Phase 4] `handleRetryBuild` lacks the `BUILD_ALREADY_ACTIVE` recovery** that
    `handleGenerate` has (`KarmaAdvisorApp.tsx:145-153`).
-
+9. [Backend, found during Phase 1] `confirm_default` affirmative-match regex is
+   too strict. `node1_intake.py:772-784` only accepts exact tokens
+   (`y|yes|yeah|yep|sure|ok|okay`); a natural reply like "Yes, go with the
+   default." falls through to the "no" branch and forces an unnecessary
+   re-ask. Not a frontend bug — flagged here as a candidate for a small
+   backend fix (e.g. `phase{N}/confirm-default-fuzzy-match`), out of scope
+   for this plan.
 ---
 
 ## 1. Phase 0 — Commit the scaffold
